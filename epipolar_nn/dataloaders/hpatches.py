@@ -50,7 +50,7 @@ class HPatchesSequence:
         self.name = name
         self._images = images
         self._homographies = homographies
-        assert(len(self._homographies) == 5)
+        assert (len(self._homographies) == 5)
         self._pairs_order = [(i, j) for i in range(0, 6) for j in range(i + 1, 6)]
 
     @staticmethod
@@ -108,6 +108,25 @@ class HPatchesSequences(torch.utils.data.Dataset):
 
     url: str = 'http://icvl.ee.ic.ac.uk/vbalnt/hpatches/hpatches-sequences-release.tar.gz'
     pairs_per_sequence: int = 15  # 6 choose 2 pairs
+    train_sequences: List[str] = ["v_there", "i_yellowtent", "i_boutique", "v_wapping", "i_leuven", "i_school",
+                                  "i_crownnight", "v_artisans", "v_colors", "i_ski", "v_circus", "v_tempera",
+                                  "v_london", "v_war", "i_parking", "v_bark", "v_charing", "i_indiana", "v_weapons",
+                                  "v_wormhole", "v_maskedman", "v_dirtywall", "v_wall", "v_vitro", "i_nuts",
+                                  "i_londonbridge", "i_pool", "i_pinard", "i_greentea", "v_calder", "i_lionday",
+                                  "i_crownday", "i_kions", "v_posters", "i_dome", "v_machines", "v_laptop", "v_boat",
+                                  "v_churchill", "i_pencils", "v_beyus", "v_sunseason", "v_samples", "v_cartooncity",
+                                  "v_gardens", "v_bip", "v_home", "i_veggies", "i_nescafe", "v_wounded", "i_toy",
+                                  "v_dogman", "i_duda", "i_contruction", "v_graffiti", "i_gonnenberg", "v_astronautis",
+                                  "i_ktirio", "i_castle", "i_greenhouse", "i_fenis", "i_partyfood", "v_adam",
+                                  "v_apprentices", "v_blueprint", "i_smurf", "i_objects", "v_bird", "i_melon",
+                                  "v_grace", "i_miniature", "v_bricks", "i_chestnuts", "i_village", "i_steps", "i_dc"]
+    test_sequences: List[str] = ["i_ajuntament", "i_resort", "i_table", "i_troulos", "i_bologna", "i_lionnight",
+                                 "i_porta", "i_zion", "i_brooklyn", "i_fruits", "i_books", "i_bridger",
+                                 "i_whitebuilding", "i_kurhaus", "i_salon", "i_autannes", "i_tools", "i_santuario",
+                                 "i_fog", "i_nijmegen", "v_courses", "v_coffeehouse", "v_abstract", "v_feast",
+                                 "v_woman", "v_talent", "v_tabletop", "v_bees", "v_strand", "v_fest", "v_yard",
+                                 "v_underground", "v_azzola", "v_eastsouth", "v_yuri", "v_soldiers", "v_man",
+                                 "v_pomegranate", "v_birdwoman", "v_busstop"]
 
     @property
     def raw_folder(self: 'HPatchesSequences') -> str:
@@ -130,15 +149,22 @@ class HPatchesSequences(torch.utils.data.Dataset):
             file_name += "grayscale-"
         if self.require_pose_changes:
             file_name += "view-change-"
+        if self.train:
+            file_name += "training-"
+        else:
+            file_name += "testing-"
         file_name += "sequences.pickle"
 
         return os.path.join(self.processed_folder, file_name)
 
-    def __init__(self: 'HPatchesSequences', root: str, download: Optional[bool] = False,
+    def __init__(self: 'HPatchesSequences', root: str,
+                 train: Optional[bool] = True,
+                 download: Optional[bool] = False,
                  require_pose_changes: Optional[bool] = True,
                  downsample_large_images: Optional[bool] = True,
                  convert_to_grayscale: Optional[bool] = True) -> None:
         self.root_folder = root
+        self.train = train
         self.require_pose_changes = require_pose_changes
         self.downsample_large_images = downsample_large_images
         self.convert_to_grayscale = convert_to_grayscale
@@ -168,7 +194,12 @@ class HPatchesSequences(torch.utils.data.Dataset):
             download_and_extract_archive(HPatchesSequences.url, download_root=self.raw_folder, remove_finished=True)
 
         if not self._check_processed_exists():
-            hpatches_folders = os.listdir(self.raw_extracted_folder)
+
+            if self.train:
+                hpatches_folders = HPatchesSequences.train_sequences
+            else:
+                hpatches_folders = HPatchesSequences.test_sequences
+
             if self.require_pose_changes:
                 hpatches_folders = [seq_folder for seq_folder in hpatches_folders if seq_folder.startswith('v_')]
 
@@ -177,7 +208,8 @@ class HPatchesSequences(torch.utils.data.Dataset):
             ]
 
             sequences = [
-                HPatchesSequence.read_raw_folder(seq_folder, self.convert_to_grayscale) for seq_folder in hpatches_folders
+                HPatchesSequence.read_raw_folder(seq_folder, self.convert_to_grayscale) for seq_folder in
+                hpatches_folders
             ]
 
             os.makedirs(self.processed_folder, exist_ok=True)
