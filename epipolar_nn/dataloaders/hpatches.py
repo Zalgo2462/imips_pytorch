@@ -7,8 +7,7 @@ import numpy as np
 import torch.utils.data
 from torchvision.datasets.utils import download_and_extract_archive
 
-from . import img_ops
-
+import cv2
 
 class HPatchesPair:
     """Represents a stereo pair from HPatches"""
@@ -68,7 +67,10 @@ class HPatchesSequence:
 
     def down_sample_in_place(self: 'HPatchesSequence') -> None:
         for i in range(len(self._images)):
-            self._images[i] = img_ops.pyrdown(self._images[i])
+            # We want to run opencv routines on a PIL image
+            # OpenCV uses BGR, PIL uses RGB, but his doesn't matter for channel independent ops
+            # Note: PIL.Image implements _array_protocol_ which satisfies numpy.array
+            self._images[i] = PIL.Image.fromarray(cv2.pyrDown(np.array(self._images[i])))
 
         h_half = np.array([[.5, 0, 0], [0, 0.5, 0], [0, 0, 1]])
         h_double = np.array([[2, 0, 0], [0, 2, 0], [0, 0, 1]])
