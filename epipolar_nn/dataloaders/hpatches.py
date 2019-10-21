@@ -2,7 +2,6 @@ import os
 import pickle
 from typing import Optional, List, Tuple
 
-import PIL.Image
 import numpy as np
 import torch.utils.data
 from torchvision.datasets.utils import download_and_extract_archive
@@ -12,7 +11,7 @@ import cv2
 class HPatchesPair:
     """Represents a stereo pair from HPatches"""
 
-    def __init__(self: 'HPatchesPair', image_1: PIL.Image.Image, image_2: PIL.Image.Image,
+    def __init__(self: 'HPatchesPair', image_1: np.ndarray, image_2: np.ndarray,
                  homography: np.ndarray, seq_name: str, indices: Tuple[int, int]):
         self.image_1 = image_1
         self.image_2 = image_2
@@ -45,9 +44,9 @@ class HPatchesPair:
 class HPatchesSequence:
     """Represents a sequence of images from HPatches of the same subject"""
 
-    def __init__(self, name: str, images: List[PIL.Image.Image], homographies: List[np.ndarray]):
+    def __init__(self, name: str, images: List[np.ndarray], homographies: List[np.ndarray]):
         self.name = name
-        self._images = images
+        self.images = images
         self._homographies = homographies
         assert (len(self._homographies) == 5)
         self._pairs_order = [(i, j) for i in range(0, 6) for j in range(i + 1, 6)]
@@ -56,21 +55,18 @@ class HPatchesSequence:
     def read_raw_folder(path: str, convert_to_grayscale: Optional[bool] = True) -> 'HPatchesSequence':
         name = os.path.basename(path)
         image_paths = [os.path.join(path, "{0}.ppm".format(i)) for i in range(1, 7)]
-        images: List[PIL.Image.Image] = [PIL.Image.open(image_path) for image_path in image_paths]
-
         # Note: IMIPS trains on grayscale images
         if convert_to_grayscale:
-            images = [img.convert('L') for img in images]
+            images: List[np.ndarray] = [cv2.imread(image_path, cv2.IMREAD_GRAYSCALE) for image_path in image_paths]
+        else:
+            images: List[np.ndarray] = [cv2.imread(image_path, cv2.IMREAD_COLOR) for image_path in image_paths]
         homography_paths = [os.path.join(path, "H_1_{0}".format(i)) for i in range(2, 7)]
         homographies: List[np.ndarray] = [np.loadtxt(homography_path) for homography_path in homography_paths]
         return HPatchesSequence(name, images, homographies)
 
-    def down_sample_in_place(self: 'HPatchesSequence') -> None:
-        for i in range(len(self._images)):
-            # We want to run opencv routines on a PIL image
-            # OpenCV uses BGR, PIL uses RGB, but his doesn't matter for channel independent ops
-            # Note: PIL.Image implements _array_protocol_ which satisfies numpy.array
-            self._images[i] = PIL.Image.fromarray(cv2.pyrDown(np.array(self._images[i])))
+    def downsample_in_place(self: 'HPatchesSequence') -> None:
+        for i in range(len(self.images)):
+            self.images[i] = cv2.pyrDown(self.images[i])
 
         h_half = np.array([[.5, 0, 0], [0, 0.5, 0], [0, 0, 1]])
         h_double = np.array([[2, 0, 0], [0, 2, 0], [0, 0, 1]])
@@ -99,8 +95,8 @@ class HPatchesSequence:
 
     def __getitem__(self: 'HPatchesSequence', linear_index: int) -> HPatchesPair:
         two_dim_index = self._pairs_order[linear_index]
-        image_1 = self._images[two_dim_index[0]]
-        image_2 = self._images[two_dim_index[1]]
+        image_1 = self.images[two_dim_index[0]]
+        image_2 = self.images[two_dim_index[1]]
         homography = self._get_homography(two_dim_index[0], two_dim_index[1])
         return HPatchesPair(image_1, image_2, homography, self.name, two_dim_index)
 
@@ -213,6 +209,12 @@ class HPatchesSequences(torch.utils.data.Dataset):
                 HPatchesSequence.read_raw_folder(seq_folder, self.convert_to_grayscale) for seq_folder in
                 hpatches_folders
             ]
+
+            # IMIPS downscales larges images
+            if self.downsample_large_images:
+                for seq in sequences:
+                    while np.any(np.array(seq.images[0].shape) > 1000):
+                        seq.downsample_in_place()
 
             os.makedirs(self.processed_folder, exist_ok=True)
             with open(self.processed_file, 'wb') as pickle_file:
