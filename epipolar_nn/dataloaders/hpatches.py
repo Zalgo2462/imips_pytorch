@@ -2,13 +2,12 @@ import os
 import pickle
 from typing import Optional, List, Tuple
 
+import cv2
 import numpy as np
 import torch.utils.data
-from torchvision.datasets.utils import download_and_extract_archive
+import torchvision.datasets.utils as tv_data
 
-import cv2
-
-from .sequence import DirectoryImageSequence
+from . import sequence
 
 
 class HPatchesPair:
@@ -58,7 +57,10 @@ class HPatchesSequence:
     def read_raw_folder(path: str, convert_to_grayscale: Optional[bool] = True) -> 'HPatchesSequence':
         name = os.path.basename(path)
         images: List[np.ndarray] = list(iter(
-            DirectoryImageSequence(os.path.join(path, "*.ppm"), convert_to_grayscale=convert_to_grayscale)
+            sequence.DirectoryImageSequence(
+                os.path.join(path, "*.ppm"),
+                convert_to_grayscale=convert_to_grayscale
+            )
         ))
         homography_paths = [os.path.join(path, "H_1_{0}".format(i)) for i in range(2, 7)]
         homographies: List[np.ndarray] = [np.loadtxt(homography_path) for homography_path in homography_paths]
@@ -189,7 +191,9 @@ class HPatchesSequences(torch.utils.data.Dataset):
         if not self._check_raw_exists():
             os.makedirs(self.raw_folder, exist_ok=True)
 
-            download_and_extract_archive(HPatchesSequences.url, download_root=self.raw_folder, remove_finished=True)
+            tv_data.download_and_extract_archive(
+                HPatchesSequences.url, download_root=self.raw_folder, remove_finished=True
+            )
 
         if not self._check_processed_exists():
 
