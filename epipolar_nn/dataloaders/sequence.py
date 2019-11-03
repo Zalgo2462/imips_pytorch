@@ -1,11 +1,11 @@
 import glob
-from typing import List, Callable
+from typing import List, Callable, Sequence
 
 import cv2
 import numpy as np
 
 
-class ImageSequence:
+class ImageSequence(Sequence[np.ndarray]):
     def __getitem__(self, index: int) -> np.ndarray:
         pass
 
@@ -32,6 +32,6 @@ class FileListImageSequence(ImageSequence):
         return len(self._file_paths)
 
 
-class DirectoryImageSequence(FileListImageSequence):
+class GlobImageSequence(FileListImageSequence):
     def __init__(self, glob_path: str, recursive=False, convert_to_grayscale=False) -> None:
         super().__init__(sorted(glob.glob(glob_path, recursive=recursive)), convert_to_grayscale)

@@ -22,7 +22,7 @@ class HPatchesPair:
         self.seq_name = seq_name
         self.indices = indices
 
-    def correspondences(self: 'HPatchesPair', pixels_xy: np.ndarray, inverse: bool = False):
+    def correspondences(self: 'HPatchesPair', pixels_xy: np.ndarray, inverse: bool = False) -> np.ndarray:
         # pixels_xy are a 2d column major array
         tx_h = self.H
         if inverse:
@@ -43,8 +43,8 @@ class HPatchesPair:
         return "{0}: {1} {2}".format(self.seq_name, self.indices[0] + 1, self.indices[1] + 1)
 
 
-class HPatchesSequence:
-    """Represents a sequence of images from HPatches of the same subject"""
+class HPatchesPairGenerator:
+    """Generates pairs of stereo images from an HPatches Sequence"""
 
     def __init__(self, name: str, images: List[np.ndarray], homographies: List[np.ndarray]):
         self.name = name
@@ -54,19 +54,19 @@ class HPatchesSequence:
         self._pairs_order = [(i, j) for i in range(0, 6) for j in range(i + 1, 6)]
 
     @staticmethod
-    def read_raw_folder(path: str, convert_to_grayscale: Optional[bool] = True) -> 'HPatchesSequence':
+    def read_raw_folder(path: str, convert_to_grayscale: Optional[bool] = True) -> 'HPatchesPairGenerator':
         name = os.path.basename(path)
         images: List[np.ndarray] = list(iter(
-            sequence.DirectoryImageSequence(
+            sequence.GlobImageSequence(
                 os.path.join(path, "*.ppm"),
                 convert_to_grayscale=convert_to_grayscale
             )
         ))
         homography_paths = [os.path.join(path, "H_1_{0}".format(i)) for i in range(2, 7)]
         homographies: List[np.ndarray] = [np.loadtxt(homography_path) for homography_path in homography_paths]
-        return HPatchesSequence(name, images, homographies)
+        return HPatchesPairGenerator(name, images, homographies)
 
-    def downsample_in_place(self: 'HPatchesSequence') -> None:
+    def downsample_in_place(self: 'HPatchesPairGenerator') -> None:
         for i in range(len(self.images)):
             self.images[i] = cv2.pyrDown(self.images[i])
 
@@ -82,7 +82,7 @@ class HPatchesSequence:
                 )
             )
 
-    def _get_homography(self: 'HPatchesSequence', index_1: int, index_2: int) -> np.ndarray:
+    def _get_homography(self: 'HPatchesPairGenerator', index_1: int, index_2: int) -> np.ndarray:
         # Subtract 1 from indices since the first homography (linear index == 0) is (0, 1)
         if index_1 == 0:
             return self._homographies[index_2 - 1]  # hom. (0 -> index_2)
@@ -92,10 +92,10 @@ class HPatchesSequence:
                 np.linalg.inv(self._homographies[index_1 - 1])  # hom. (index_1 -> 0)
             )
 
-    def __len__(self: 'HPatchesSequence') -> int:
+    def __len__(self: 'HPatchesPairGenerator') -> int:
         return len(self._pairs_order)
 
-    def __getitem__(self: 'HPatchesSequence', linear_index: int) -> HPatchesPair:
+    def __getitem__(self: 'HPatchesPairGenerator', linear_index: int) -> HPatchesPair:
         two_dim_index = self._pairs_order[linear_index]
         image_1 = self.images[two_dim_index[0]]
         image_2 = self.images[two_dim_index[1]]
@@ -103,8 +103,8 @@ class HPatchesSequence:
         return HPatchesPair(image_1, image_2, homography, self.name, two_dim_index)
 
 
-class HPatchesSequences(torch.utils.data.Dataset):
-    """Loads the HPatches sequences dataset"""
+class HPatchesSequenceStereoPairs(torch.utils.data.Dataset):
+    """Loads the HPatches sequences dataset and returns stereo pairs of images from each sequence"""
 
     url: str = 'http://icvl.ee.ic.ac.uk/vbalnt/hpatches/hpatches-sequences-release.tar.gz'
     pairs_per_sequence: int = 15  # 6 choose 2 pairs
@@ -129,19 +129,19 @@ class HPatchesSequences(torch.utils.data.Dataset):
                                  "v_pomegranate", "v_birdwoman", "v_busstop"]
 
     @property
-    def raw_folder(self: 'HPatchesSequences') -> str:
+    def raw_folder(self: 'HPatchesSequenceStereoPairs') -> str:
         return os.path.join(self.root_folder, self.__class__.__name__, 'raw')
 
     @property
-    def raw_extracted_folder(self: 'HPatchesSequences') -> str:
+    def raw_extracted_folder(self: 'HPatchesSequenceStereoPairs') -> str:
         return os.path.join(self.raw_folder, "hpatches-sequences-release")
 
     @property
-    def processed_folder(self: 'HPatchesSequences') -> str:
+    def processed_folder(self: 'HPatchesSequenceStereoPairs') -> str:
         return os.path.join(self.root_folder, self.__class__.__name__, 'processed')
 
     @property
-    def processed_file(self: 'HPatchesSequences') -> str:
+    def processed_file(self: 'HPatchesSequenceStereoPairs') -> str:
         file_name = "hpatches-"
         if self.downsample_large_images:
             file_name += "downsampled-"
@@ -157,7 +157,7 @@ class HPatchesSequences(torch.utils.data.Dataset):
 
         return os.path.join(self.processed_folder, file_name)
 
-    def __init__(self: 'HPatchesSequences', root: str,
+    def __init__(self: 'HPatchesSequenceStereoPairs', root: str,
                  train: Optional[bool] = True,
                  download: Optional[bool] = False,
                  require_pose_changes: Optional[bool] = True,
@@ -180,27 +180,27 @@ class HPatchesSequences(torch.utils.data.Dataset):
             self.sequences = pickle.load(pickle_file)
         return
 
-    def __len__(self: 'HPatchesSequences'):
+    def __len__(self: 'HPatchesSequenceStereoPairs') -> int:
         return self.pairs_per_sequence * len(self.sequences)
 
-    def __getitem__(self: 'HPatchesSequences', index: int):
+    def __getitem__(self: 'HPatchesSequenceStereoPairs', index: int) -> HPatchesPair:
         return self.sequences[index // self.pairs_per_sequence][index % self.pairs_per_sequence]
 
-    def download(self: 'HPatchesSequences') -> None:
+    def download(self: 'HPatchesSequenceStereoPairs') -> None:
 
         if not self._check_raw_exists():
             os.makedirs(self.raw_folder, exist_ok=True)
 
             tv_data.download_and_extract_archive(
-                HPatchesSequences.url, download_root=self.raw_folder, remove_finished=True
+                HPatchesSequenceStereoPairs.url, download_root=self.raw_folder, remove_finished=True
             )
 
         if not self._check_processed_exists():
 
             if self.train:
-                hpatches_folders = HPatchesSequences.train_sequences
+                hpatches_folders = HPatchesSequenceStereoPairs.train_sequences
             else:
-                hpatches_folders = HPatchesSequences.test_sequences
+                hpatches_folders = HPatchesSequenceStereoPairs.test_sequences
 
             if self.require_pose_changes:
                 hpatches_folders = [seq_folder for seq_folder in hpatches_folders if seq_folder.startswith('v_')]
@@ -210,7 +210,7 @@ class HPatchesSequences(torch.utils.data.Dataset):
             ]
 
             sequences = [
-                HPatchesSequence.read_raw_folder(seq_folder, self.convert_to_grayscale) for seq_folder in
+                HPatchesPairGenerator.read_raw_folder(seq_folder, self.convert_to_grayscale) for seq_folder in
                 hpatches_folders
             ]
 
@@ -224,8 +224,8 @@ class HPatchesSequences(torch.utils.data.Dataset):
             with open(self.processed_file, 'wb') as pickle_file:
                 pickle.dump(sequences, pickle_file)
 
-    def _check_raw_exists(self: 'HPatchesSequences') -> bool:
+    def _check_raw_exists(self: 'HPatchesSequenceStereoPairs') -> bool:
         return os.path.exists(self.raw_extracted_folder)
 
-    def _check_processed_exists(self: 'HPatchesSequences') -> bool:
+    def _check_processed_exists(self: 'HPatchesSequenceStereoPairs') -> bool:
         return os.path.exists(self.processed_file)
