@@ -1,3 +1,4 @@
+import bisect
 import os
 import pickle
 import shutil
@@ -13,19 +14,33 @@ from . import klt, sequence, pair
 class VideoStereoPairGenerator:
 
     def __init__(self: 'VideoStereoPairGenerator', name: str, images: Sequence[np.ndarray],
-                 sequence_overlap: klt.SequenceOverlap):
+                 sequence_overlap: klt.SequenceOverlap, minimum_overlap: float):
         self.name = name
         self.img_sequence = images
-        self.sequence_overlap = sequence_overlap
+        self._min_overlap = minimum_overlap
+        self._overlapped_frames_cum_sum = []
 
-    def generate_random_stereo_pair(self: 'VideoStereoPairGenerator', minimum_overlap: float) -> pair.ImagePair:
-        image_2_possibilies = np.array([])
-        while image_2_possibilies.size == 0:
-            image_1_index = np.random.randint(0, len(self.img_sequence))
-            image_2_possibilies = self.sequence_overlap.find_frames_with_overlap(image_1_index, minimum_overlap)
-        image_2_index = np.random.randint(0, image_2_possibilies.size)
+        overlapped_frames = sequence_overlap.find_frames_with_overlap(0, self._min_overlap).size
+        self._overlapped_frames_cum_sum.append(overlapped_frames)
+        for i in range(1, len(self.img_sequence) - 1):
+            overlapped_frames = sequence_overlap.find_frames_with_overlap(i, self._min_overlap).size
+            self._overlapped_frames_cum_sum.append(overlapped_frames + self._overlapped_frames_cum_sum[-1])
+
+    def __len__(self):
+        return self._overlapped_frames_cum_sum[-1]
+
+    def __getitem__(self, index: int) -> pair.ImagePair:
+        if index > len(self):
+            raise IndexError()
+
+        img_1_index = bisect.bisect_right(self._overlapped_frames_cum_sum, index)
+
+        if img_1_index > 0:
+            img_2_index = (img_1_index + 1) + (index - self._overlapped_frames_cum_sum[img_1_index - 1])
+        else:
+            img_2_index = 1 + index
+
         # TODO: Define PairWithIntermediates type ImagePair
-        # TODO: Figure out how we go from random stereo pairs in old code to ordered stereo pairs in new code...
         raise NotImplementedError()
 
 
@@ -35,11 +50,11 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
     @property
     def train_sequences(self: 'TUMMonocularStereoPairs') -> List[str]:
         # IMIPS only trains on 1, 2, 3, 48, 49, 50 by default
-        return [TUMMonocularStereoPairs.all_sequences[x] for x in [1, 2, 3, 48, 49, 50]]
+        return [TUMMonocularStereoPairs.all_sequences[x - 1] for x in [1, 2, 3, 48, 49, 50]]
 
     @property
     def test_sequences(self: 'TUMMonocularStereoPairs') -> List[str]:
-        return [TUMMonocularStereoPairs.all_sequences[x] for x in range(4, 48)]
+        return [TUMMonocularStereoPairs.all_sequences[x - 1] for x in range(4, 48)]
 
     @property
     def raw_folder(self: 'TUMMonocularStereoPairs') -> str:
@@ -51,7 +66,8 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
 
     def __init__(self: 'TUMMonocularStereoPairs', root: str,
                  train: Optional[bool] = True,
-                 download: Optional[bool] = False) -> None:
+                 download: Optional[bool] = False,
+                 minimum_KLT_overlap: Optional[float] = 0.3) -> None:
         self.root_folder = os.path.abspath(root)
         self.train = train
 
@@ -65,7 +81,9 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
         sequence_names = self.train_sequences if self.train \
             else self.test_sequences
 
-        self.stereo_pair_generators = []
+        self._stereo_pair_generators = []
+        self._generator_len_cum_sum = []
+
         for seq_name in sequence_names:
             seq_path = os.path.join(self.processed_folder, seq_name)
             img_seq = sequence.GlobImageSequence(os.path.join(
@@ -73,13 +91,27 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
             ))
             with open(os.path.join(seq_path, "overlap.pickle"), 'rb') as overlap_file:
                 seq_overlap = pickle.load(overlap_file)
-            self.stereo_pair_generators.append(VideoStereoPairGenerator(seq_path, img_seq, seq_overlap))
+
+            seq_pair_generator = VideoStereoPairGenerator(seq_name, img_seq, seq_overlap, minimum_KLT_overlap)
+            self._stereo_pair_generators.append(seq_pair_generator)
+            self._generator_len_cum_sum.append(len(seq_pair_generator))
+
+        for i in range(1, len(self._generator_len_cum_sum)):
+            self._generator_len_cum_sum[i] += self._generator_len_cum_sum[i - 1]
 
     def __len__(self) -> int:
-        raise NotImplementedError()
+        return self._generator_len_cum_sum[-1]
 
     def __getitem__(self, index: int) -> pair.ImagePair:
-        raise NotImplementedError()
+        if index > len(self):
+            raise IndexError()
+
+        generator_index = bisect.bisect_right(self._generator_len_cum_sum, index)
+        if generator_index > 0:
+            index_base_for_generator = self._generator_len_cum_sum[generator_index - 1]
+        else:
+            index_base_for_generator = 0
+        return self._stereo_pair_generators[generator_index][index - index_base_for_generator]
 
     def download(self: 'TUMMonocularStereoPairs') -> None:
         if not self._check_raw_exists():
