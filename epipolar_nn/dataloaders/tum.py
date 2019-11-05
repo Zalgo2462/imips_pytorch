@@ -2,46 +2,12 @@ import bisect
 import os
 import pickle
 import shutil
-from typing import Optional, Sequence, List
+from typing import Optional, List
 
 import docker
-import numpy as np
 import torch.utils.data
 
 from . import klt, sequence, pair
-
-
-class VideoStereoPairGenerator:
-
-    def __init__(self: 'VideoStereoPairGenerator', name: str, images: Sequence[np.ndarray],
-                 sequence_overlap: klt.SequenceOverlap, minimum_overlap: float):
-        self.name = name
-        self.img_sequence = images
-        self._min_overlap = minimum_overlap
-        self._overlapped_frames_cum_sum = []
-
-        overlapped_frames = sequence_overlap.find_frames_with_overlap(0, self._min_overlap).size
-        self._overlapped_frames_cum_sum.append(overlapped_frames)
-        for i in range(1, len(self.img_sequence) - 1):
-            overlapped_frames = sequence_overlap.find_frames_with_overlap(i, self._min_overlap).size
-            self._overlapped_frames_cum_sum.append(overlapped_frames + self._overlapped_frames_cum_sum[-1])
-
-    def __len__(self):
-        return self._overlapped_frames_cum_sum[-1]
-
-    def __getitem__(self, index: int) -> pair.StereoPair:
-        if index > len(self):
-            raise IndexError()
-
-        img_1_index = bisect.bisect_right(self._overlapped_frames_cum_sum, index)
-
-        if img_1_index > 0:
-            img_2_index = (img_1_index + 1) + (index - self._overlapped_frames_cum_sum[img_1_index - 1])
-        else:
-            img_2_index = 1 + index
-
-        # TODO: Define PairWithIntermediates type ImagePair
-        raise NotImplementedError()
 
 
 class TUMMonocularStereoPairs(torch.utils.data.Dataset):
@@ -71,6 +37,8 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
         self.root_folder = os.path.abspath(root)
         self.train = train
 
+        self._tracker = klt.Tracker()
+
         if download:
             self.download()
 
@@ -92,7 +60,8 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
             with open(os.path.join(seq_path, "overlap.pickle"), 'rb') as overlap_file:
                 seq_overlap = pickle.load(overlap_file)
 
-            seq_pair_generator = VideoStereoPairGenerator(seq_name, img_seq, seq_overlap, minimum_KLT_overlap)
+            seq_pair_generator = pair.KLTPairGenerator(seq_name, img_seq, self._tracker, seq_overlap,
+                                                       minimum_KLT_overlap)
             self._stereo_pair_generators.append(seq_pair_generator)
             self._generator_len_cum_sum.append(len(seq_pair_generator))
 
@@ -119,7 +88,6 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
             self._run_dockerized_tum_rectifier()
 
         if not self._check_processed_exists():
-            tracker = klt.Tracker()
             os.makedirs(self.processed_folder, exist_ok=True)
             for seq_name in self.all_sequences:
                 old_seq_path = os.path.join(self.raw_folder, seq_name)
@@ -128,7 +96,7 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
                 new_seq_image_path = os.path.join(new_seq_path, "images")
                 shutil.copytree(old_seq_image_path, new_seq_image_path)
                 img_seq = sequence.GlobImageSequence(os.path.join(new_seq_image_path, "*.jpg"))
-                seq_overlap = tracker.find_sequence_overlap(img_seq, max_num_points=500)
+                seq_overlap = self._tracker.find_sequence_overlap(img_seq, max_num_points=500)
                 with open(os.path.join(new_seq_path, "overlap.pickle"), 'wb') as overlap_file:
                     pickle.dump(seq_overlap, overlap_file)
 

@@ -39,4 +39,3 @@ class FileListImageSequence(ImageSequence):
 class GlobImageSequence(FileListImageSequence):
     def __init__(self, glob_path: str, recursive=False, convert_to_grayscale=False) -> None:
         super().__init__(sorted(glob.glob(glob_path, recursive=recursive)), convert_to_grayscale)
-

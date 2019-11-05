@@ -145,7 +145,8 @@ class Tracker:
         near_border = np.logical_or(near_lower_border, near_upper_border)
         return near_border
 
-    def track(self: 'Tracker', img_1: np.ndarray, img_2: np.ndarray, img_1_points_rc: np.ndarray):
+    def track(self: 'Tracker', img_1: np.ndarray, img_2: np.ndarray,
+              img_1_points_rc: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         img_1_points_xy = np.reshape(np.fliplr(img_1_points_rc.T), (-1, 1, 2)).astype(np.float32)
         img_2_points_xy, _, _ = cv2.calcOpticalFlowPyrLK(img_1, img_2, img_1_points_xy, None)
         img_1_points_xy_reverse_flow, _, _ = cv2.calcOpticalFlowPyrLK(img_2, img_1, img_2_points_xy, None)
