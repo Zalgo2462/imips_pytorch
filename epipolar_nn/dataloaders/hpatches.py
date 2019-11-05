@@ -7,40 +7,16 @@ import numpy as np
 import torch.utils.data
 import torchvision.datasets.utils as tv_data
 
-from . import sequence
+from . import sequence, pair
 
 
-class HPatchesPair:
+class HPatchesPair(pair.HomographyPair):
     """Represents a stereo pair from HPatches"""
 
-    def __init__(self: 'HPatchesPair', image_1: np.ndarray, image_2: np.ndarray,
-                 homography: np.ndarray, seq_name: str, indices: Tuple[int, int]):
-        self.image_1 = image_1
-        self.image_2 = image_2
-        self.H = homography
-        self.inv_H = np.linalg.inv(homography)
-        self.seq_name = seq_name
-        self.indices = indices
-
-    def correspondences(self: 'HPatchesPair', pixels_xy: np.ndarray, inverse: bool = False) -> np.ndarray:
-        # pixels_xy are a 2d column major array
-        tx_h = self.H
-        if inverse:
-            tx_h = self.inv_H
-
-        homogeneous_tx_points = np.dot(
-            tx_h,
-            np.vstack((
-                pixels_xy,
-                np.ones((1, pixels_xy.shape[1]))
-            ))
-        )
-        return homogeneous_tx_points[0:2, :] / homogeneous_tx_points[2, :]
-
-    @property
-    def name(self: 'HPatchesPair'):
-        # Add 1 to the indices since the folder names are 1 indexed
-        return "{0}: {1} {2}".format(self.seq_name, self.indices[0] + 1, self.indices[1] + 1)
+    def __init__(self: 'HPatchesPair', image_1: np.ndarray, image_2: np.ndarray, homography: np.ndarray,
+                 seq_name: str, indices: Tuple[int, int]):
+        name = "{0}: {1} {2}".format(seq_name, indices[0] + 1, indices[1] + 1)
+        super().__init__(image_1, image_2, homography, name)
 
 
 class HPatchesPairGenerator:

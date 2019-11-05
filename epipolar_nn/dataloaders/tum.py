@@ -29,7 +29,7 @@ class VideoStereoPairGenerator:
     def __len__(self):
         return self._overlapped_frames_cum_sum[-1]
 
-    def __getitem__(self, index: int) -> pair.ImagePair:
+    def __getitem__(self, index: int) -> pair.StereoPair:
         if index > len(self):
             raise IndexError()
 
@@ -102,7 +102,7 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
     def __len__(self) -> int:
         return self._generator_len_cum_sum[-1]
 
-    def __getitem__(self, index: int) -> pair.ImagePair:
+    def __getitem__(self, index: int) -> pair.StereoPair:
         if index > len(self):
             raise IndexError()
 
