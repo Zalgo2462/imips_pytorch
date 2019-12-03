@@ -6,16 +6,37 @@ import torch
 import epipolar_nn.dataloaders.pair
 
 
+# note: inlier_distance = 3 comes from imips
 def generate_training_patches(
         pair: epipolar_nn.dataloaders.pair.StereoPair,
         img_1_keypoints_xy: torch.Tensor, img_2_keypoints_xy: torch.Tensor,
-        patch_diameter: int,
+        patch_diameter: int, inlier_distance: int = 3,
 ) -> Tuple[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
            Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
-    # Grab numpy references to the keypoint data.
-    # TODO: figure out how this conflicts with gpu/ cuda
+    """
+    Given a training pair and the keypoints detected by the network for each image,
+    return the training patches for the predicted anchors and true correspondences,
+    as well as the inlier/outlier labels for each image.
 
+    The patch diameter controls the size of the returned patches. This should
+    correspond with the number of convolutions in the network. i.e.
+    patch_diameter = num_conv_layers * 2 + 1 if each layer is a 3x3 convolution.
+
+    Inlier_distance controls the labelling of inliers. The predicted anchor in one image
+    and the true correspondence of the anchor predicted in the other image must be
+    this close to be considered an inlier. If there exists a valid correspondence,
+    but the distance from the anchor to the correspondence is beyond this limit,
+    the prediction is labelled as an outlier.
+
+    Returns a two-tuple where each entry is in itself, a tuple.
+    The first tuple corresponds to image 1 in the pair, and the second tuple
+    corresponds to the second image.
+    Each tuple has the form: (anchor patches, correspondence patches, inlier labels, outlier labels)
+    Anchor patches and correspondence patches are tensors of the form BxHxWxC
+    """
     # Convert keypoints to numpy data structures to compute the correspondences
+    # The correspondences are calculated via numpy, and therefore are likely to be
+    # done on the CPU
     img_1_keypoints_xy_np = img_1_keypoints_xy.numpy()
     img_2_keypoints_xy_np = img_2_keypoints_xy.numpy()
 
@@ -24,6 +45,8 @@ def generate_training_patches(
         inverse=False
     )
     # img_1_correspondences_xy is (zero, zero).T where img_1_correspondences_mask is False
+    # unpack_correspondences returns torch tensors, likely having the effect of moving the
+    # data back to the GPU
     img_1_correspondences_xy, img_1_correspondences_mask = _unpack_correspondences(
         img_1_keypoints_xy_np,
         img_1_packed_correspondences_xy,
@@ -40,10 +63,10 @@ def generate_training_patches(
         img_2_correspondences_indices,
     )
 
-    max_inlier_distance = torch.tensor([3])
+    max_inlier_distance = torch.tensor([inlier_distance])
 
     # img_1_inlier_distances measures how far off the keypoints predicted in image 1
-    # are from the correspondences of the keypoints predicted from image 2
+    # are from the true correspondences of the keypoints predicted from image 2
     img_1_inlier_distances = torch.norm((img_1_keypoints_xy - img_2_correspondences_xy), p=2, dim=0)
     img_1_inlier_distance_mask = (img_1_inlier_distances < torch.tensor(max_inlier_distance))
 
@@ -77,10 +100,13 @@ def generate_training_patches(
     # This is a holdover from the original work. It might make more sense to
     # swap the kp and corr patches around in the future.
     # img 1_kp_patches come from the anchor points detected in img 1
-    # img 2 corr patches come from the real correspondences of the anchor points detected in img 1
-    # img 2 kp patches come from the anchor points detected in img 2
     # img 1 corr patches come from the real correspondences of the anchor points detected in img 2
-
+    # img 2 kp patches come from the anchor points detected in img 2
+    # img 2 corr patches come from the real correspondences of the anchor points detected in img 1
+    # img_1_inliers is true at an index when there is a valid, true correspondence in img_1 for the anchor in img_2
+    #   and the anchor in img_1 is close to the true correspondence in img_1
+    # img_2_inliers is true at an index when there is a valid, true correspondence in img_2 for the anchor in img_1
+    #   and the anchor in img_2 is close to the true correspondence in img_2
     return (
         (img_1_kp_patches, img_1_corr_patches, img_1_inliers, img_1_outliers),
         (img_2_kp_patches, img_2_corr_patches, img_2_inliers, img_2_outliers),
@@ -88,9 +114,15 @@ def generate_training_patches(
 
 
 def _image_to_patch_batch(image_np: np.ndarray, keypoints_xy: torch.Tensor, diameter: int) -> torch.Tensor:
+    """
+    Extracts keypoints_xy.shape[1] patches from image_np centered on the given keypoints.
+    Each image will be diameter x diameter. Returns a tensor of BxHxWxC
+    """
     if diameter % 2 != 1:
         raise ValueError("diameter must be odd")
 
+    # this will likely copy the image from RAM to to the GPU, it might be worthwhile
+    # to cache the pair images gpu side in tensors
     image = torch.tensor(image_np)
     radius = (diameter - 1) / 2
 
@@ -106,20 +138,36 @@ def _image_to_patch_batch(image_np: np.ndarray, keypoints_xy: torch.Tensor, diam
         keypoint_y = keypoints_xy[1, point_idx]
         if multichannel:
             batch[point_idx, :, :, :] = image[
-                                        keypoint_x - radius: keypoint_x + radius,
                                         keypoint_y - radius: keypoint_y + radius,
+                                        keypoint_x - radius: keypoint_x + radius,
                                         :,
                                         ]
         else:
             batch[point_idx, :, :, 0] = image[
-                                        keypoint_x - radius: keypoint_x + radius,
                                         keypoint_y - radius: keypoint_y + radius,
+                                        keypoint_x - radius: keypoint_x + radius,
                                         ]
     return batch
 
 
 def _unpack_correspondences(keypoints_xy: np.ndarray, correspondences_xy: np.ndarray, correspondence_indices) -> \
         Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Converts the correspondences from their packed form to their unpacked form.
+
+    In the packed form, the items of correspondences_xy are mapped to keypoints_xy
+    by the correspondence_indices array. Where correspondences_xy[i] matches
+    keypoints_xy[correspondence_indicies[i]].
+
+    In the unpacked form, the correspondences are matched to keypoints_xy by index alone.
+    If no correspondence exists for a given point in keypoints_xy, the resulting
+    correspondence is (zero, zero).T. The correspondence_mask is aligned with
+    keypoints_xy and unpacked_correspondences_xy such that correspondence_mask[i]
+    is True when a valid correspondence exists for keypoints_xy[i] and False otherwise.
+
+    This method takes in numpy arrays and returns torch tensors. This likely has the effect
+    of moving the data from RAM into the GPU.
+    """
     unpacked_correspondences_xy = np.zeros_like(keypoints_xy)
     unpacked_correspondences_xy[correspondence_indices] = correspondences_xy
 
