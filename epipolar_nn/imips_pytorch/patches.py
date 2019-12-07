@@ -11,8 +11,8 @@ def generate_training_patches(
         pair: epipolar_nn.dataloaders.pair.StereoPair,
         img_1_keypoints_xy: torch.Tensor, img_2_keypoints_xy: torch.Tensor,
         patch_diameter: int, inlier_distance: int = 3,
-) -> Tuple[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-           Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+           torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Given a training pair and the keypoints detected by the network for each image,
     return the training patches for the predicted anchors and true correspondences,
@@ -28,10 +28,10 @@ def generate_training_patches(
     but the distance from the anchor to the correspondence is beyond this limit,
     the prediction is labelled as an outlier.
 
-    Returns a two-tuple where each entry is in itself, a tuple.
-    The first tuple corresponds to image 1 in the pair, and the second tuple
+    Returns an eight-tuple.
+    The first four entries corresponds to image 1 in the pair, and the last four entries
     corresponds to the second image.
-    Each tuple has the form: (anchor patches, correspondence patches, inlier labels, outlier labels)
+    Each set has the form: (anchor patches, correspondence patches, inlier labels, outlier labels)
     Anchor patches and correspondence patches are tensors of the form BxHxWxC
     """
     # Convert keypoints to numpy data structures to compute the correspondences
@@ -107,10 +107,8 @@ def generate_training_patches(
     #   and the anchor in img_1 is close to the true correspondence in img_1
     # img_2_inliers is true at an index when there is a valid, true correspondence in img_2 for the anchor in img_1
     #   and the anchor in img_2 is close to the true correspondence in img_2
-    return (
-        (img_1_kp_patches, img_1_corr_patches, img_1_inliers, img_1_outliers),
-        (img_2_kp_patches, img_2_corr_patches, img_2_inliers, img_2_outliers),
-    )
+    return img_1_kp_patches, img_1_corr_patches, img_1_inliers, img_1_outliers, \
+           img_2_kp_patches, img_2_corr_patches, img_2_inliers, img_2_outliers
 
 
 def _image_to_patch_batch(image_np: np.ndarray, keypoints_xy: torch.Tensor, diameter: int) -> torch.Tensor:
