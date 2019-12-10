@@ -1,30 +1,31 @@
-from typing import Iterator
+from typing import Iterator, Callable, Union, Iterable
 
 import torch.utils.data
+from torch.optim.optimizer import Optimizer as TorchOptimizer
 
+import epipolar_nn.dataloaders.image
 import epipolar_nn.dataloaders.pair
+import epipolar_nn.dataloaders.random
 import epipolar_nn.dataloaders.tum
+import epipolar_nn.imips_pytorch.networks.convnet
 import epipolar_nn.imips_pytorch.networks.imips
 from .patches import generate_training_patches
 
 
-def main():
-    data_root = "./data"
-    iterations = 100000  # default in imips. TUM dataset has 2336234 pairs ...
-    tum_dataset = epipolar_nn.dataloaders.tum.TUMMonocularStereoPairs(root=data_root, train=True, download=True)
-    loader = torch.utils.data.DataLoader(tum_dataset, batch_size=1, shuffle=True)
-    print(len(tum_dataset))
-
-
 class ImipsTrainer:
 
-    def __init__(self, network: epipolar_nn.imips_pytorch.networks.imips.ImipsNet, dataset: torch.utils.data.Dataset):
+    def __init__(self,
+                 network: epipolar_nn.imips_pytorch.networks.imips.ImipsNet,
+                 dataset: torch.utils.data.Dataset,
+                 optimizer_factory: Callable[[Union[Iterable[torch.Tensor], dict]], TorchOptimizer]):
         self._network = network
         self._dataset = dataset
         self._dataset_iter = self._create_new_load_iterator()
+        self._optimizer = optimizer_factory(self._network.parameters())
 
     def _create_new_load_iterator(self) -> Iterator[epipolar_nn.dataloaders.pair.StereoPair]:
-        return iter(torch.utils.data.DataLoader(self._dataset, batch_size=1, shuffle=True))
+        shuffled_dataset = epipolar_nn.dataloaders.random.ShuffledDataset(self._dataset)
+        return iter(torch.utils.data.DataLoader(shuffled_dataset, batch_size=None, collate_fn=lambda x: x))
 
     def _next_pair(self) -> epipolar_nn.dataloaders.pair.StereoPair:
         try:
@@ -33,9 +34,11 @@ class ImipsTrainer:
             self._dataset_iter = self._create_new_load_iterator()
             return next(self._dataset_iter)
 
-    def _train_patches(self, anchor_images: torch.Tensor, correspondence_images: torch.Tensor,
+    def _train_patches(self, maximizer_patches: torch.Tensor, correspondence_patches: torch.Tensor,
                        inlier_labels: torch.Tensor,
                        outlier_labels: torch.Tensor):
+
+        # comments assume maximizer_patches and correspondence_patches are both pulled from image 1 in a pair
 
         # convert the label types so we can use torch.diag() on the labels
         if inlier_labels.dtype == torch.bool:
@@ -44,89 +47,103 @@ class ImipsTrainer:
         if outlier_labels.dtype == torch.bool:
             outlier_labels = outlier_labels.to(torch.uint8)
 
-        # comments assume anchor_images and correspondence_images are both pulled from image 1 in a pair
-        assert len(anchor_images.shape) == len(correspondence_images.shape) == 4 and \
-               anchor_images.shape[3] == correspondence_images.shape[3] == self._network.input_channels()
+        # maximizer_patches: BxCxHxW
+        # correspondence_patches: BxCxHxW
+        # inlier_labels: B
+        # outlier_labels: B
 
-        assert len(inlier_labels.shape) == len(outlier_labels.shape) == 1
+        # ensure the number of channels in the patches matches the input channels of the network
+        assert len(maximizer_patches.shape) == len(correspondence_patches.shape) == 4 and \
+               maximizer_patches.shape[3] == correspondence_patches.shape[3] == self._network.input_channels()
 
-        assert inlier_labels.shape[0] == \
-               outlier_labels.shape[0] == anchor_images.shape[0] == correspondence_images.shape[0]
+        # ensure the number of input patches matches the number of output channels
+        assert len(inlier_labels.shape) == len(outlier_labels.shape) == 1 and inlier_labels.shape[0] == \
+               outlier_labels.shape[0] == maximizer_patches.shape[0] == correspondence_patches.shape[0] == \
+               self._network.output_channels()
 
-        assert self._network.receptive_field_diameter() == anchor_images.shape[1] == anchor_images.shape[2] == \
-               correspondence_images.shape[1] == correspondence_images.shape[2]
+        # ensure the patches match the size of the receptive field
+        assert self._network.receptive_field_diameter() == maximizer_patches.shape[1] == maximizer_patches.shape[2] == \
+               correspondence_patches.shape[1] == correspondence_patches.shape[2]
 
-        # Bx1x1xC where B == C
-        anchor_outputs: torch.Tensor = self._network(anchor_images, False)
-        correspondence_outputs: torch.Tensor = self._network(correspondence_images, False)
+        # maximizer_outputs: BxCx1x1 where B == C
+        # correspondence_outputs: BxCx1x1 where B == C
+        maximizer_outputs: torch.Tensor = self._network(maximizer_patches, False)
+        correspondence_outputs: torch.Tensor = self._network(correspondence_patches, False)
 
-        assert anchor_outputs.shape[0] == anchor_outputs.shape[3] == correspondence_outputs.shape[0] == \
-               correspondence_outputs.shape[3]
+        assert maximizer_outputs.shape[0] == maximizer_outputs.shape[1] == \
+               correspondence_outputs.shape[0] == correspondence_outputs.shape[1]
 
-        assert anchor_outputs.shape[1] == anchor_outputs.shape[2] == correspondence_outputs.shape[1] == \
-               correspondence_outputs.shape[2] == 1
+        assert maximizer_outputs.shape[2] == maximizer_outputs.shape[3] == \
+               correspondence_outputs.shape[2] == correspondence_outputs.shape[3] == 1
 
-        # Get the aligned, outlier responses where i \in B == j \in C
-        # The following two losses work together to push down errant predictions
-        # and promote responses to the correct predictions
-        aligned_outlier_index = torch.diag(outlier_labels).unsqueeze(1).unsqueeze(1)
+        maximizer_outputs.squeeze()  # BxCx1x1 -> BxC
+        correspondence_outputs.squeeze()  # BxCx1x1 -> BxC
 
-        # Grab the scores at the true correspondences sites in image 1 for each channel
-        # which did not align it's anchor prediction in image 1 with the
-        # true correspondence in image 1 from it's anchor predictions in image 2
-        aligned_corr_outlier_scores = correspondence_outputs[aligned_outlier_index]
-        assert len(aligned_corr_outlier_scores.shape) == 1
+        # The goal is to maximize each channel's response to it's patch in image 1 which corresponds
+        # with it's maximizing patch in image 2. If the patch which maximizes a channel's response in
+        # image 1 is within a given radius of the patch in image 1 which corresponds
+        # with the channel's maximizing patch in image 2, the channel is assigned a loss of 0.
+        # Otherwise, if the maximizing patch for a channel is outside of this radius, the channel's loss is
+        # set to maximize the channel's response to the patch in image 1 which corresponds
+        # with the channel's maximizing patch in image 2.
+        #
+        # Research note: why do we allow the maximum response to be within a radius? Why complicate the loss
+        # this way? Maybe try always maximizing each channel's response to the patch in image 1 which
+        # corresponds with the channel's maximizing patch in image 2.
 
-        # lower scores at the true correspondence sites lead to higher losses
-        # This will promote the channel's response to the true correspondence in
-        # image 1 from it's anchor prediction in image 2
-        # this is called correspondence loss by imips
-        outlier_correspondence_loss = torch.sum(-1 * torch.log(aligned_corr_outlier_scores))
+        # grabs the outlier responses where the batch index and channel index align.
+        aligned_outlier_index = torch.diag(outlier_labels)
 
-        # Grab the scores at the predicted anchor sites in image 1 for each channel
-        # which did not align it's anchor prediction in image 1 with the
-        # true correspondence in image 1 from it's anchor predictions in image 2
-        aligned_anchor_outlier_scores = anchor_outputs[aligned_outlier_index]
+        aligned_outlier_correspondence_scores = correspondence_outputs[aligned_outlier_index]
+        assert len(aligned_outlier_correspondence_scores.shape) == 1
 
-        # higher scores at the mispredicted anchor sites lead to higher losses
-        # This will reduce the channel's response to the mispredicted anchor
-        # in image 1
-        # this is called outlier loss by imips
-        outlier_anchor_loss = torch.sum(-1 * torch.log(-1 * aligned_anchor_outlier_scores + 1))
+        # A lower response to a channel's patch in image 1 which corresponds with it's maximizing patch in image 2
+        # will lead to a higher loss. This is called correspondence loss by imips
+        outlier_correspondence_loss = torch.sum(-1 * torch.log(aligned_outlier_correspondence_scores))
 
-        outlier_loss = outlier_correspondence_loss + outlier_anchor_loss
+        # If a channel's maximum response is outside of a given radius about the target correspondence site, the
+        # channel's response to it's maximizing patch in image 1 is minimized.
+        aligned_outlier_maximizer_scores = maximizer_outputs[aligned_outlier_index]
 
-        # Get the aligned, inlier responses where i \in B == j \in C
-        aligned_inlier_index = torch.diag(inlier_labels).unsqueeze(1).unsqueeze(1)
-        # Grab the scores at the anchor sites in image 1 for each channel
-        # which did align it's anchor prediction in image 1 with the true
-        # correspondence in image 1 from it's anchor prediction in image 2
-        aligned_anchor_inlier_scores = anchor_outputs[aligned_inlier_index]
-        assert len(aligned_anchor_inlier_scores.shape) == 1
+        # A higher response to a channel's maximizing patch in image 1 will lead to a
+        # higher loss for a channel which attains its maximum outside of a given radius
+        # about it's target correspondence site. This is called outlier loss by imips.
+        outlier_maximizer_loss = torch.sum(-1 * torch.log(-1 * aligned_outlier_maximizer_scores + 1))
 
-        # lower scores at the anchor sites lead to higher losses
-        # This will reinforce the channel's response at the correct anchor prediction
-        # in image 1
-        inlier_loss = torch.sum(-1 * torch.log(aligned_anchor_inlier_scores))
+        outlier_loss = outlier_correspondence_loss + outlier_maximizer_loss
 
-        # Next, we build a suppression loss push down any responses fromu naligned channels
-        # on images for which their aligned channel produced an inlier prediction
+        # If a channel's maximum response is inside of a given radius about the target correspondence site, the
+        # chanel's response to it's maximizing patch in image 1 is maximized.
 
-        # We can think about the broadcasted xor broadcasting across the columns of
-        # an image x channel matrix
-        suppression_index = aligned_inlier_index ^ inlier_labels.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-        unaligned_scores = anchor_outputs[suppression_index]
+        # grabs the inlier responses where the batch index and channel index align.
+        aligned_inlier_index = torch.diag(inlier_labels)
+
+        aligned_inlier_maximizer_scores = maximizer_outputs[aligned_inlier_index]
+        assert len(aligned_inlier_maximizer_scores.shape) == 1
+
+        # A lower response to a channel's maximizing patch in image 1 wil lead to
+        # a higher loss for a channel which attains its maximum inside of a given radius
+        # about it's target correspondence site. This is called inlier_loss by imips.
+        inlier_loss = torch.sum(-1 * torch.log(aligned_inlier_maximizer_scores))
+
+        # Finally, if a channel attains its maximum response inside of a given radius
+        # about it's target correspondence site, the responses of all the other channels
+        # to it's maximizing patch are minimized. (Kind of...)
+        # equivalent: inlier_labels.unsqueeze(1).repeat(1, inlier_labels.shape[0]) - inlier_labels.diag()
+        unaligned_inlier_index = aligned_inlier_index ^ inlier_labels.unsqueeze(1)
+        unaligned_inlier_maximizer_scores = maximizer_outputs[unaligned_inlier_index]
 
         # imips just adds the unaligned scores to the loss directly
-        suppression_loss = torch.sum(unaligned_scores)
+        loss = outlier_loss + inlier_loss + unaligned_inlier_maximizer_scores
 
-        loss = outlier_loss + inlier_loss + sum(unaligned_scores)
-
-        # TODO: something with the loss
+        # run the optimizer with the loss
+        self._optimizer.zero_grad()
+        loss.backward()
+        self._optimizer.step()
 
     def _train_pair(self, pair: epipolar_nn.dataloaders.pair.StereoPair):
-        image_1 = torch.tensor(pair.image_1, requires_grad=False)
-        image_2 = torch.tensor(pair.image_2, requires_grad=False)
+        image_1 = epipolar_nn.dataloaders.image.load_image_for_torch(pair.image_1)
+        image_2 = epipolar_nn.dataloaders.image.load_image_for_torch(pair.image_2)
         image_1_keypoints = self._network.extract_keypoints(image_1)
         image_2_keypoints = self._network.extract_keypoints(image_2)
 
@@ -139,6 +156,7 @@ class ImipsTrainer:
                 inlier_distance=3
             )
 
+        # Debugged up to here!
         self._train_patches(image_1_anchor_patches, image_1_corr_patches, image_1_inlier_labels, image_1_outlier_labels)
         self._train_patches(image_2_anchor_patches, image_2_corr_patches, image_2_inlier_labels, image_2_outlier_labels)
 
@@ -146,9 +164,3 @@ class ImipsTrainer:
         for iteration in range(1, iterations + 1):
             curr_pair = self._next_pair()
             self._train_pair(curr_pair)
-
-            # send each image through net
-
-
-if __name__ == "__main__":
-    main()
