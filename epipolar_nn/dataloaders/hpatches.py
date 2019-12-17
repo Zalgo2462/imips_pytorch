@@ -79,8 +79,8 @@ class HPatchesPairGenerator:
         return HPatchesPair(image_1, image_2, homography, self.name, two_dim_index)
 
 
-class HPatchesSequenceStereoPairs(torch.utils.data.Dataset):
-    """Loads the HPatches sequences dataset and returns stereo pairs of images from each sequence"""
+class HPatchesSequencesStereoPairs(torch.utils.data.Dataset):
+    """Loads the HPatches sequences train_dataset and returns stereo pairs of images from each sequence"""
 
     url: str = 'http://icvl.ee.ic.ac.uk/vbalnt/hpatches/hpatches-sequences-release.tar.gz'
     pairs_per_sequence: int = 15  # 6 choose 2 pairs
@@ -105,19 +105,19 @@ class HPatchesSequenceStereoPairs(torch.utils.data.Dataset):
                                  "v_pomegranate", "v_birdwoman", "v_busstop"]
 
     @property
-    def raw_folder(self: 'HPatchesSequenceStereoPairs') -> str:
+    def raw_folder(self: 'HPatchesSequencesStereoPairs') -> str:
         return os.path.join(self.root_folder, self.__class__.__name__, 'raw')
 
     @property
-    def raw_extracted_folder(self: 'HPatchesSequenceStereoPairs') -> str:
+    def raw_extracted_folder(self: 'HPatchesSequencesStereoPairs') -> str:
         return os.path.join(self.raw_folder, "hpatches-sequences-release")
 
     @property
-    def processed_folder(self: 'HPatchesSequenceStereoPairs') -> str:
+    def processed_folder(self: 'HPatchesSequencesStereoPairs') -> str:
         return os.path.join(self.root_folder, self.__class__.__name__, 'processed')
 
     @property
-    def processed_file(self: 'HPatchesSequenceStereoPairs') -> str:
+    def processed_file(self: 'HPatchesSequencesStereoPairs') -> str:
         file_name = "hpatches-"
         if self.downsample_large_images:
             file_name += "downsampled-"
@@ -133,7 +133,7 @@ class HPatchesSequenceStereoPairs(torch.utils.data.Dataset):
 
         return os.path.join(self.processed_folder, file_name)
 
-    def __init__(self: 'HPatchesSequenceStereoPairs', root: str,
+    def __init__(self: 'HPatchesSequencesStereoPairs', root: str,
                  train: Optional[bool] = True,
                  download: Optional[bool] = False,
                  require_pose_changes: Optional[bool] = True,
@@ -156,27 +156,27 @@ class HPatchesSequenceStereoPairs(torch.utils.data.Dataset):
             self.sequences = pickle.load(pickle_file)
         return
 
-    def __len__(self: 'HPatchesSequenceStereoPairs') -> int:
+    def __len__(self: 'HPatchesSequencesStereoPairs') -> int:
         return self.pairs_per_sequence * len(self.sequences)
 
-    def __getitem__(self: 'HPatchesSequenceStereoPairs', index: int) -> HPatchesPair:
+    def __getitem__(self: 'HPatchesSequencesStereoPairs', index: int) -> HPatchesPair:
         return self.sequences[index // self.pairs_per_sequence][index % self.pairs_per_sequence]
 
-    def download(self: 'HPatchesSequenceStereoPairs') -> None:
+    def download(self: 'HPatchesSequencesStereoPairs') -> None:
 
         if not self._check_raw_exists():
             os.makedirs(self.raw_folder, exist_ok=True)
 
             tv_data.download_and_extract_archive(
-                HPatchesSequenceStereoPairs.url, download_root=self.raw_folder, remove_finished=True
+                HPatchesSequencesStereoPairs.url, download_root=self.raw_folder, remove_finished=True
             )
 
         if not self._check_processed_exists():
 
             if self.train:
-                hpatches_folders = HPatchesSequenceStereoPairs.train_sequences
+                hpatches_folders = HPatchesSequencesStereoPairs.train_sequences
             else:
-                hpatches_folders = HPatchesSequenceStereoPairs.test_sequences
+                hpatches_folders = HPatchesSequencesStereoPairs.test_sequences
 
             if self.require_pose_changes:
                 hpatches_folders = [seq_folder for seq_folder in hpatches_folders if seq_folder.startswith('v_')]
@@ -200,8 +200,8 @@ class HPatchesSequenceStereoPairs(torch.utils.data.Dataset):
             with open(self.processed_file, 'wb') as pickle_file:
                 pickle.dump(sequences, pickle_file)
 
-    def _check_raw_exists(self: 'HPatchesSequenceStereoPairs') -> bool:
+    def _check_raw_exists(self: 'HPatchesSequencesStereoPairs') -> bool:
         return os.path.exists(self.raw_extracted_folder)
 
-    def _check_processed_exists(self: 'HPatchesSequenceStereoPairs') -> bool:
+    def _check_processed_exists(self: 'HPatchesSequencesStereoPairs') -> bool:
         return os.path.exists(self.processed_file)

@@ -7,6 +7,8 @@ import epipolar_nn.dataloaders.image
 import epipolar_nn.dataloaders.pair
 
 
+# TODO: Move thes functions to train.py
+
 def generate_training_patches(
         pair: epipolar_nn.dataloaders.pair.StereoPair,
         img_1_keypoints_xy: torch.Tensor, img_2_keypoints_xy: torch.Tensor,
@@ -34,52 +36,16 @@ def generate_training_patches(
     Each set has the form: (anchor patches, correspondence patches, inlier labels, outlier labels)
     Anchor patches and correspondence patches are tensors of the form BxCxHxW
     """
-    # Convert keypoints to numpy data structures to compute the correspondences
-    # The correspondences are calculated via numpy/ opencv, and therefore are likely
-    # computed on the CPU
-    img_1_keypoints_xy_np = img_1_keypoints_xy.cpu().numpy()
-    img_2_keypoints_xy_np = img_2_keypoints_xy.cpu().numpy()
-
-    img_1_packed_correspondences_xy, img_1_correspondences_indices = pair.correspondences(
-        img_1_keypoints_xy_np,
-        inverse=False
-    )
-    # img_1_correspondences_xy is (zero, zero).T where img_1_correspondences_mask is False
-    # unpack_correspondences returns torch tensors, likely having the effect of moving the
-    # data back to the GPU
-    img_1_correspondences_xy, img_1_correspondences_mask = _unpack_correspondences(
-        img_1_keypoints_xy_np,
-        img_1_packed_correspondences_xy,
-        img_1_correspondences_indices
+    img_1_correspondences_xy, img_1_correspondences_mask, \
+    img_2_correspondences_xy, img_2_correspondences_mask = _find_correspondences(
+        pair, img_1_keypoints_xy, img_2_keypoints_xy
     )
 
-    img_2_packed_correspondences_xy, img_2_correspondences_indices = pair.correspondences(
-        img_2_keypoints_xy_np,
-        inverse=True
+    img_1_inliers, img_1_outliers, img_2_inliers, img_2_outliers = _label_inliers_outliers(
+        img_1_keypoints_xy, img_1_correspondences_xy, img_1_correspondences_mask,
+        img_2_keypoints_xy, img_2_correspondences_xy, img_2_correspondences_mask,
+        inlier_distance
     )
-    img_2_correspondences_xy, img_2_correspondences_mask = _unpack_correspondences(
-        img_2_keypoints_xy_np,
-        img_2_packed_correspondences_xy,
-        img_2_correspondences_indices,
-    )
-
-    max_inlier_distance = torch.tensor([inlier_distance], device="cuda")
-
-    # img_1_inlier_distances measures how far off the keypoints predicted in image 1
-    # are from the true correspondences of the keypoints predicted from image 2
-    img_1_inlier_distances = torch.norm((img_1_keypoints_xy - img_2_correspondences_xy), p=2, dim=0)
-    img_1_inlier_distance_mask = (img_1_inlier_distances < max_inlier_distance)
-
-    # inliers and outliers in this anchor image are determined by the true correspondences of the keypoints
-    # detected when its paired image is ran through the net as an anchor image
-    img_1_inliers = img_1_inlier_distance_mask & img_2_correspondences_mask
-    img_1_outliers = ~img_1_inlier_distance_mask & img_2_correspondences_mask
-
-    img_2_inlier_distances = torch.norm((img_2_keypoints_xy - img_1_correspondences_xy), p=2, dim=0)
-    img_2_inlier_distance_mask = img_2_inlier_distances < max_inlier_distance
-
-    img_2_inliers = img_2_inlier_distance_mask & img_1_correspondences_mask
-    img_2_outliers = ~img_2_inlier_distance_mask & img_1_correspondences_mask
 
     img_1_kp_patches = _image_to_patch_batch(pair.image_1, img_1_keypoints_xy, patch_diameter)
     img_1_corr_patches = torch.zeros_like(img_1_kp_patches, device="cuda")
@@ -111,6 +77,125 @@ def generate_training_patches(
            img_2_kp_patches, img_2_corr_patches, img_2_inliers, img_2_outliers
 
 
+def count_inliers(pair: epipolar_nn.dataloaders.pair.StereoPair,
+                  img_1_keypoints_xy: torch.Tensor, img_2_keypoints_xy: torch.Tensor,
+                  inlier_distance: int = 3) -> Tuple[torch.Tensor, torch.Tensor]:
+    img_1_correspondences_xy, img_1_correspondences_mask, \
+    img_2_correspondences_xy, img_2_correspondences_mask = _find_correspondences(
+        pair, img_1_keypoints_xy, img_2_keypoints_xy
+    )
+
+    img_1_inliers, img_1_outliers, img_2_inliers, img_2_outliers = _label_inliers_outliers(
+        img_1_keypoints_xy, img_1_correspondences_xy, img_1_correspondences_mask,
+        img_2_keypoints_xy, img_2_correspondences_xy, img_2_correspondences_mask,
+        inlier_distance
+    )
+
+    apparent_inliers = img_1_inliers & img_2_inliers
+    num_apparent_inliers = apparent_inliers.sum()
+    apparent_inlier_img_1_keypoints_xy = img_1_keypoints_xy[:, apparent_inliers]
+
+    num_true_inliers = torch.zeros(1, device="cuda")
+
+    if num_apparent_inliers > 0:
+        max_inlier_distance = torch.tensor([inlier_distance], device="cuda")
+        unique_inlier_img_1_keypoints_xy = apparent_inlier_img_1_keypoints_xy[:, 0:1]
+        for i in range(1, int(num_apparent_inliers)):
+            test_inlier = apparent_inlier_img_1_keypoints_xy[:, i:i + 1]
+            if (torch.norm(unique_inlier_img_1_keypoints_xy - test_inlier, p=2, dim=0) > max_inlier_distance).all():
+                unique_inlier_img_1_keypoints_xy = torch.cat((unique_inlier_img_1_keypoints_xy, test_inlier), dim=1)
+                num_true_inliers += 1
+
+    return num_apparent_inliers, num_true_inliers
+
+
+def _find_correspondences(pair: epipolar_nn.dataloaders.pair.StereoPair,
+                          img_1_keypoints_xy: torch.Tensor,
+                          img_2_keypoints_xy: torch.Tensor) \
+        -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    # Convert keypoints to numpy data structures to compute the correspondences
+    # The correspondences are calculated via numpy/ opencv, and therefore are likely
+    # computed on the CPU
+    img_1_keypoints_xy_np = img_1_keypoints_xy.cpu().numpy()
+    img_2_keypoints_xy_np = img_2_keypoints_xy.cpu().numpy()
+
+    img_1_packed_correspondences_xy, img_1_correspondences_indices = pair.correspondences(
+        img_1_keypoints_xy_np,
+        inverse=False
+    )
+    img_2_packed_correspondences_xy, img_2_correspondences_indices = pair.correspondences(
+        img_2_keypoints_xy_np,
+        inverse=True
+    )
+
+    # img_1_correspondences_xy is (zero, zero).T where img_1_correspondences_mask is False
+    # unpack_correspondences returns torch tensors, this will move the data back to the GPU
+    img_1_correspondences_xy, img_1_correspondences_mask = _unpack_correspondences(
+        img_1_keypoints_xy_np,
+        img_1_packed_correspondences_xy,
+        img_1_correspondences_indices
+    )
+    img_2_correspondences_xy, img_2_correspondences_mask = _unpack_correspondences(
+        img_2_keypoints_xy_np,
+        img_2_packed_correspondences_xy,
+        img_2_correspondences_indices,
+    )
+
+    return img_1_correspondences_xy, img_1_correspondences_mask, img_2_correspondences_xy, img_2_correspondences_mask
+
+
+def _unpack_correspondences(keypoints_xy: np.ndarray, correspondences_xy: np.ndarray, correspondence_indices) -> \
+        Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Converts the correspondences from their packed form to their unpacked form.
+
+    In the packed form, the items of correspondences_xy are mapped to keypoints_xy
+    by the correspondence_indices array. Where correspondences_xy[i] matches
+    keypoints_xy[correspondence_indicies[i]].
+
+    In the unpacked form, the correspondences are matched to keypoints_xy by index alone.
+    If no correspondence exists for a given point in keypoints_xy, the resulting
+    correspondence is (zero, zero).T. The correspondence_mask is aligned with
+    keypoints_xy and unpacked_correspondences_xy such that correspondence_mask[i]
+    is True when a valid correspondence exists for keypoints_xy[i] and False otherwise.
+
+    This method takes in numpy arrays and returns torch tensors. This has the effect
+    of moving the data from RAM into the GPU.
+    """
+    unpacked_correspondences_xy = np.zeros_like(keypoints_xy)
+    unpacked_correspondences_xy[:, correspondence_indices] = correspondences_xy
+
+    correspondences_mask = np.zeros(keypoints_xy.shape[1], dtype=np.bool)
+    correspondences_mask[correspondence_indices] = True
+
+    return torch.tensor(unpacked_correspondences_xy, device="cuda"), torch.tensor(correspondences_mask, device="cuda")
+
+
+def _label_inliers_outliers(img_1_keypoints_xy: torch.Tensor, img_1_correspondences_xy: torch.Tensor,
+                            img_1_correspondences_mask: torch.Tensor, img_2_keypoints_xy: torch.Tensor,
+                            img_2_correspondences_xy: torch.Tensor, img_2_correspondences_mask: torch.Tensor,
+                            inlier_distance: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    max_inlier_distance = torch.tensor([inlier_distance], device="cuda")
+
+    # img_1_inlier_distances measures how far off the keypoints predicted in image 1
+    # are from the true correspondences of the keypoints predicted from image 2
+    img_1_inlier_distances = torch.norm((img_1_keypoints_xy - img_2_correspondences_xy), p=2, dim=0)
+    img_1_inlier_distance_mask = (img_1_inlier_distances < max_inlier_distance)
+
+    # inliers and outliers in this anchor image are determined by the true correspondences of the keypoints
+    # detected when its paired image is ran through the net as an anchor image
+    img_1_inliers = img_1_inlier_distance_mask & img_2_correspondences_mask
+    img_1_outliers = ~img_1_inlier_distance_mask & img_2_correspondences_mask
+
+    img_2_inlier_distances = torch.norm((img_2_keypoints_xy - img_1_correspondences_xy), p=2, dim=0)
+    img_2_inlier_distance_mask = img_2_inlier_distances < max_inlier_distance
+
+    img_2_inliers = img_2_inlier_distance_mask & img_1_correspondences_mask
+    img_2_outliers = ~img_2_inlier_distance_mask & img_1_correspondences_mask
+
+    return img_1_inliers, img_1_outliers, img_2_inliers, img_2_outliers
+
+
 def _image_to_patch_batch(image_np: np.ndarray, keypoints_xy: torch.Tensor, diameter: int) -> torch.Tensor:
     """
     Extracts keypoints_xy.shape[1] patches from image_np centered on the given keypoints.
@@ -136,31 +221,3 @@ def _image_to_patch_batch(image_np: np.ndarray, keypoints_xy: torch.Tensor, diam
                                     keypoint_x - radius: keypoint_x + radius + 1
                                     ]
     return batch
-
-
-def _unpack_correspondences(keypoints_xy: np.ndarray, correspondences_xy: np.ndarray, correspondence_indices) -> \
-        Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Converts the correspondences from their packed form to their unpacked form.
-
-    In the packed form, the items of correspondences_xy are mapped to keypoints_xy
-    by the correspondence_indices array. Where correspondences_xy[i] matches
-    keypoints_xy[correspondence_indicies[i]].
-
-    In the unpacked form, the correspondences are matched to keypoints_xy by index alone.
-    If no correspondence exists for a given point in keypoints_xy, the resulting
-    correspondence is (zero, zero).T. The correspondence_mask is aligned with
-    keypoints_xy and unpacked_correspondences_xy such that correspondence_mask[i]
-    is True when a valid correspondence exists for keypoints_xy[i] and False otherwise.
-
-    This method takes in numpy arrays and returns torch tensors. This has the effect
-    of moving the data from RAM into the GPU.
-    """
-    unpacked_correspondences_xy = np.zeros_like(keypoints_xy)
-    # ValueError: shape mismatch: value array of shape (2,83) could not be broadcast to indexing result of shape (83,128)
-    unpacked_correspondences_xy[:, correspondence_indices] = correspondences_xy
-
-    correspondences_mask = np.zeros(keypoints_xy.shape[1], dtype=np.bool)
-    correspondences_mask[correspondence_indices] = True
-
-    return torch.tensor(unpacked_correspondences_xy, device="cuda"), torch.tensor(correspondences_mask, device="cuda")
