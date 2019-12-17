@@ -16,9 +16,9 @@ import epipolar_nn.imips_pytorch.train
 def train_net():
     data_root = "./data"
     checkpoints_root = "./checkpoints/imips"
-    iterations = 1000  # 100000  # default in imips. TUM train_dataset has 2336234 pairs ...
+    iterations = 100000  # default in imips. TUM train_dataset has 2336234 pairs ...
     num_eval_samples = 50
-    validation_frequency = 10  # 250 # default in imips
+    validation_frequency = 250  # default in imips
     learning_rate = 10e-6
     seed = 0
 
@@ -36,7 +36,6 @@ def train_net():
     def adam_optimizer_factory(parameters: Union[Iterable[torch.Tensor], dict]) -> TorchOptimizer:
         return torch.optim.Adam(parameters, learning_rate)
 
-    # TODO: load from checkpoint
     network: epipolar_nn.imips_pytorch.networks.imips.ImipsNet = epipolar_nn.imips_pytorch.networks.convnet.SimpleConv(
         num_convolutions=14,
         input_channels=1,

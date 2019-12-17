@@ -147,6 +147,9 @@ class Tracker:
 
     def track(self: 'Tracker', img_1: np.ndarray, img_2: np.ndarray,
               img_1_points_rc: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        if img_1_points_rc.size == 0:
+            return np.array([], dtype=int), np.zeros_like(img_1_points_rc)
+
         img_1_points_xy = np.reshape(np.fliplr(img_1_points_rc.T), (-1, 1, 2)).astype(np.float32)
         img_2_points_xy, _, _ = cv2.calcOpticalFlowPyrLK(img_1, img_2, img_1_points_xy, None)
         img_1_points_xy_reverse_flow, _, _ = cv2.calcOpticalFlowPyrLK(img_2, img_1, img_2_points_xy, None)
