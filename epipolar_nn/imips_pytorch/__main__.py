@@ -25,7 +25,7 @@ def train_net():
     current_time = datetime.now().strftime('%b%d_%H-%M-%S')
     checkpoints_dir = os.path.join(checkpoints_root, current_time + '_' + socket.gethostname())
 
-    os.makedirs(checkpoints_root, exist_ok=True)
+    os.makedirs(checkpoints_dir, exist_ok=True)
 
     tum_dataset = epipolar_nn.dataloaders.tum.TUMMonocularStereoPairs(root=data_root, train=True, download=True)
     hpatches_dataset = epipolar_nn.dataloaders.hpatches.HPatchesSequencesStereoPairs(
