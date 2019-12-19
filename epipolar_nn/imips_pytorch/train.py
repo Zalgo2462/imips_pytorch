@@ -1,7 +1,9 @@
 import os.path
+import random
 import time
 from typing import Iterator, Callable, Union, Iterable, Tuple
 
+import cv2
 import numpy as np
 import torch.utils.data
 import torch.utils.tensorboard
@@ -24,7 +26,8 @@ class ImipsTrainer:
                  eval_dataset: torch.utils.data.Dataset,
                  num_eval_samples: int,
                  save_directory: str,
-                 inlier_radius: int = 3
+                 inlier_radius: int = 3,
+                 seed: int = 0,
                  ):
         self._network = network
         self._optimizer = optimizer_factory(self._network.parameters())
@@ -37,6 +40,33 @@ class ImipsTrainer:
         self._t_board_writer = torch.utils.tensorboard.SummaryWriter()
         self._best_checkpoint_path = os.path.join(save_directory, "imips_best.chkpt")
         self._latest_checkpoint_path = os.path.join(save_directory, "imips_latest.chkpt")
+        self._seed = seed
+
+        np.random.seed(self._seed)
+        torch.random.manual_seed(self._seed)
+        random.seed(self._seed)
+
+    # ################ CHECKPOINTING ################
+
+    def _load_checkpoint(self, checkpoint: dict):
+        self._seed = checkpoint["seed"]
+        np.random.seed(self._seed)
+        torch.random.manual_seed(self._seed)
+        random.seed(self._seed)
+
+        self._optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self._network.load_state_dict(checkpoint["network_state_dict"])
+        self._inlier_radius = checkpoint["inlier_radius"]
+        for i in range(0, checkpoint["iteration"]):
+            self._next_pair()
+
+    def load_best_checkpoint(self):
+        self._load_checkpoint(torch.load(self._best_checkpoint_path))
+
+    def load_latest_checkpoint(self):
+        self._load_checkpoint(torch.load(self._latest_checkpoint_path))
+
+    # ################ DATASET ITERATION ################
 
     def _create_new_train_dataset_iterator(self) -> Iterator[epipolar_nn.dataloaders.pair.StereoPair]:
         # reshuffle the original dataset and begin iterating one pair at a time
@@ -49,6 +79,199 @@ class ImipsTrainer:
         except StopIteration:
             self._train_dataset_iter = self._create_new_train_dataset_iterator()
             return next(self._train_dataset_iter)
+
+    # ################ TRAINING ################
+
+    @staticmethod
+    def _unpack_correspondences(keypoints_xy: np.ndarray, correspondences_xy: np.ndarray, correspondence_indices) -> \
+            Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Converts the correspondences from their packed form to their unpacked form.
+
+        In the packed form, the items of correspondences_xy are mapped to keypoints_xy
+        by the correspondence_indices array. Where correspondences_xy[i] matches
+        keypoints_xy[correspondence_indicies[i]].
+
+        In the unpacked form, the correspondences are matched to keypoints_xy by index alone.
+        If no correspondence exists for a given point in keypoints_xy, the resulting
+        correspondence is (zero, zero).T. The correspondence_mask is aligned with
+        keypoints_xy and unpacked_correspondences_xy such that correspondence_mask[i]
+        is True when a valid correspondence exists for keypoints_xy[i] and False otherwise.
+
+        This method takes in numpy arrays and returns torch tensors. This has the effect
+        of moving the data from RAM into the GPU.
+        """
+        unpacked_correspondences_xy = np.zeros_like(keypoints_xy)
+        unpacked_correspondences_xy[:, correspondence_indices] = correspondences_xy
+
+        correspondences_mask = np.zeros(keypoints_xy.shape[1], dtype=np.bool)
+        correspondences_mask[correspondence_indices] = True
+
+        return torch.tensor(unpacked_correspondences_xy, device="cuda"), torch.tensor(correspondences_mask,
+                                                                                      device="cuda")
+
+    @staticmethod
+    def _find_correspondences(pair: epipolar_nn.dataloaders.pair.StereoPair,
+                              img_1_keypoints_xy: torch.Tensor,
+                              img_2_keypoints_xy: torch.Tensor) \
+            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Convert keypoints to numpy data structures to compute the correspondences
+        # The correspondences are calculated via numpy/ opencv, and therefore are likely
+        # computed on the CPU
+        img_1_keypoints_xy_np = img_1_keypoints_xy.cpu().numpy()
+        img_2_keypoints_xy_np = img_2_keypoints_xy.cpu().numpy()
+
+        img_1_packed_correspondences_xy, img_1_correspondences_indices = pair.correspondences(
+            img_1_keypoints_xy_np,
+            inverse=False
+        )
+        img_2_packed_correspondences_xy, img_2_correspondences_indices = pair.correspondences(
+            img_2_keypoints_xy_np,
+            inverse=True
+        )
+
+        # img_1_correspondences_xy is (zero, zero).T where img_1_correspondences_mask is False
+        # unpack_correspondences returns torch tensors, this will move the data back to the GPU
+        img_1_correspondences_xy, img_1_correspondences_mask = ImipsTrainer._unpack_correspondences(
+            img_1_keypoints_xy_np,
+            img_1_packed_correspondences_xy,
+            img_1_correspondences_indices
+        )
+        img_2_correspondences_xy, img_2_correspondences_mask = ImipsTrainer._unpack_correspondences(
+            img_2_keypoints_xy_np,
+            img_2_packed_correspondences_xy,
+            img_2_correspondences_indices,
+        )
+
+        return (img_1_correspondences_xy, img_1_correspondences_mask,
+                img_2_correspondences_xy, img_2_correspondences_mask)
+
+    @staticmethod
+    def _create_correspondence_image(pair: epipolar_nn.dataloaders.pair.StereoPair, image_1_pixels_xy: torch.Tensor,
+                                     image_2_pixels_xy: torch.Tensor,
+                                     correspondence_mask: torch.Tensor) -> torch.Tensor:
+        image_1_pixels_xy = image_1_pixels_xy.cpu()
+        image_2_pixels_xy = image_2_pixels_xy.cpu()
+        correspondence_mask = correspondence_mask.cpu()
+
+        image_1_keypoints = [cv2.KeyPoint(image_1_pixels_xy[0][i], image_1_pixels_xy[1][i], 1) for i in
+                             range(image_1_pixels_xy.shape[1])]
+        image_2_keypoints = [cv2.KeyPoint(image_2_pixels_xy[0][i], image_2_pixels_xy[1][i], 1) for i in
+                             range(image_2_pixels_xy.shape[1])]
+
+        matches = np.arange(correspondence_mask.shape[0])
+        matches = np.vstack((matches, matches))
+        matches = matches[:, correspondence_mask]
+        matches = [cv2.DMatch(matches[0][i], matches[1][i], 0.0) for i in range(matches.shape[1])]
+
+        corr_img = cv2.drawMatches(pair.image_1, image_1_keypoints, pair.image_2, image_2_keypoints, matches, None)
+        return torch.tensor(corr_img).permute((2, 0, 1))
+
+    @staticmethod
+    def _label_inliers_outliers(img_1_keypoints_xy: torch.Tensor, img_1_correspondences_xy: torch.Tensor,
+                                img_1_correspondences_mask: torch.Tensor, img_2_keypoints_xy: torch.Tensor,
+                                img_2_correspondences_xy: torch.Tensor, img_2_correspondences_mask: torch.Tensor,
+                                inlier_distance: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        max_inlier_distance = torch.tensor([inlier_distance], device="cuda")
+
+        # img_1_inlier_distances measures how far off the keypoints predicted in image 1
+        # are from the true correspondences of the keypoints predicted from image 2
+        img_1_inlier_distances = torch.norm((img_1_keypoints_xy - img_2_correspondences_xy), p=2, dim=0)
+        img_1_inlier_distance_mask = (img_1_inlier_distances < max_inlier_distance)
+
+        # inliers and outliers in this anchor image are determined by the true correspondences of the keypoints
+        # detected when its paired image is ran through the net as an anchor image
+        img_1_inliers = img_1_inlier_distance_mask & img_2_correspondences_mask
+        img_1_outliers = ~img_1_inlier_distance_mask & img_2_correspondences_mask
+
+        img_2_inlier_distances = torch.norm((img_2_keypoints_xy - img_1_correspondences_xy), p=2, dim=0)
+        img_2_inlier_distance_mask = img_2_inlier_distances < max_inlier_distance
+
+        img_2_inliers = img_2_inlier_distance_mask & img_1_correspondences_mask
+        img_2_outliers = ~img_2_inlier_distance_mask & img_1_correspondences_mask
+
+        return img_1_inliers, img_1_outliers, img_2_inliers, img_2_outliers
+
+    @staticmethod
+    def _image_to_patch_batch(image_np: np.ndarray, keypoints_xy: torch.Tensor, diameter: int) -> torch.Tensor:
+        """
+        Extracts keypoints_xy.shape[1] patches from image_np centered on the given keypoints.
+        Returns a tensor of diameter x diameter patches in a BxCxHxW tensor. The input image is
+        expected to be a numpy image in either HxW or HxWxC format.
+        """
+        if diameter % 2 != 1:
+            raise ValueError("diameter must be odd")
+
+        keypoints_xy = keypoints_xy.to(torch.int)
+
+        # this will copy the image from RAM to to the GPU,
+        image = epipolar_nn.dataloaders.image.load_image_for_torch(image_np)
+        radius = (diameter - 1) // 2
+
+        batch = torch.zeros((keypoints_xy.shape[1], image.shape[0], diameter, diameter), device="cuda")
+        for point_idx in range(keypoints_xy.shape[1]):
+            keypoint_x = keypoints_xy[0, point_idx]
+            keypoint_y = keypoints_xy[1, point_idx]
+            batch[point_idx, :, :, :] = image[
+                                        :,
+                                        keypoint_y - radius: keypoint_y + radius + 1,
+                                        keypoint_x - radius: keypoint_x + radius + 1
+                                        ]
+        return batch
+
+    @staticmethod
+    def _generate_training_patches(
+            pair: epipolar_nn.dataloaders.pair.StereoPair,
+            img_1_keypoints_xy: torch.Tensor, img_1_correspondences_xy, img_1_correspondences_mask,
+            img_2_keypoints_xy: torch.Tensor, img_2_correspondences_xy, img_2_correspondences_mask,
+            patch_diameter: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Given a training pair and the keypoints detected by the network for each image,
+        return the training patches for the predicted anchors and true correspondences,
+        as well as the inlier/outlier labels for each image.
+
+        The patch diameter controls the size of the returned patches. This should
+        correspond with the number of convolutions in the network. i.e.
+        patch_diameter = num_conv_layers * 2 + 1 if each layer is a 3x3 convolution.
+
+        Inlier_distance controls the labelling of inliers. The predicted anchor in one image
+        and the true correspondence of the anchor predicted in the other image must be
+        this close to be considered an inlier. If there exists a valid correspondence,
+        but the distance from the anchor to the correspondence is beyond this limit,
+        the prediction is labelled as an outlier.
+
+        Returns an eight-tuple.
+        The first four entries corresponds to the first image in the pair, and the last four entries
+        corresponds to the second image.
+        Each set has the form: (anchor patches, correspondence patches, inlier labels, outlier labels)
+        Anchor patches and correspondence patches are tensors of the form BxCxHxW
+        """
+
+        img_1_kp_patches = ImipsTrainer._image_to_patch_batch(pair.image_1, img_1_keypoints_xy, patch_diameter)
+        img_1_corr_patches = torch.zeros_like(img_1_kp_patches, device="cuda")
+        img_1_corr_patches[img_2_correspondences_mask, :, :, :] = ImipsTrainer._image_to_patch_batch(
+            pair.image_1,
+            img_2_correspondences_xy[:, img_2_correspondences_mask],
+            patch_diameter
+        )
+        img_2_kp_patches = ImipsTrainer._image_to_patch_batch(pair.image_2, img_2_keypoints_xy, patch_diameter)
+        img_2_corr_patches = torch.zeros_like(img_2_kp_patches, device="cuda")
+        img_2_corr_patches[img_1_correspondences_mask, :, :, :] = ImipsTrainer._image_to_patch_batch(
+            pair.image_2,
+            img_1_correspondences_xy[:, img_1_correspondences_mask],
+            patch_diameter
+        )
+
+        # The results are returned in in two batches, one for each image that was sampled.
+        # img_1_kp_patches come from the anchor points detected in img 1 (img_1_keypoints_xy)
+        # img_1_corr_patches come from the real correspondences of the anchor points detected
+        #   in img 2 (img_2_correspondences_xy)
+        # img_2_kp_patches come from the anchor points detected in img 2 (img_2_keypoints_xy)
+        # img_2_corr_patches come from the real correspondences of the anchor points detected
+        #   in img 1 (img_1_correspondences_xy)
+
+        return img_1_kp_patches, img_1_corr_patches, img_2_kp_patches, img_2_corr_patches
 
     def _train_patches(self, maximizer_patches: torch.Tensor, correspondence_patches: torch.Tensor,
                        inlier_labels: torch.Tensor,
@@ -69,28 +292,28 @@ class ImipsTrainer:
         # outlier_labels: B
 
         # ensure the number of channels in the patches matches the input channels of the network
-        assert len(maximizer_patches.shape) == len(correspondence_patches.shape) == 4 and \
-               maximizer_patches.shape[1] == correspondence_patches.shape[1] == self._network.input_channels()
+        assert (len(maximizer_patches.shape) == len(correspondence_patches.shape) == 4 and
+                maximizer_patches.shape[1] == correspondence_patches.shape[1] == self._network.input_channels())
 
         # ensure the number of input patches matches the number of output channels
-        assert len(inlier_labels.shape) == len(outlier_labels.shape) == 1 and inlier_labels.shape[0] == \
-               outlier_labels.shape[0] == maximizer_patches.shape[0] == correspondence_patches.shape[0] == \
-               self._network.output_channels()
+        assert (len(inlier_labels.shape) == len(outlier_labels.shape) == 1 and inlier_labels.shape[0] ==
+                outlier_labels.shape[0] == maximizer_patches.shape[0] == correspondence_patches.shape[0] ==
+                self._network.output_channels())
 
         # ensure the patches match the size of the receptive field
-        assert self._network.receptive_field_diameter() == maximizer_patches.shape[2] == maximizer_patches.shape[3] == \
-               correspondence_patches.shape[2] == correspondence_patches.shape[3]
+        assert (self._network.receptive_field_diameter() == maximizer_patches.shape[2] == maximizer_patches.shape[3] ==
+                correspondence_patches.shape[2] == correspondence_patches.shape[3])
 
         # maximizer_outputs: BxCx1x1 where B == C
         # correspondence_outputs: BxCx1x1 where B == C
         maximizer_outputs: torch.Tensor = self._network(maximizer_patches, False)
         correspondence_outputs: torch.Tensor = self._network(correspondence_patches, False)
 
-        assert maximizer_outputs.shape[0] == maximizer_outputs.shape[1] == \
-               correspondence_outputs.shape[0] == correspondence_outputs.shape[1]
+        assert (maximizer_outputs.shape[0] == maximizer_outputs.shape[1] ==
+                correspondence_outputs.shape[0] == correspondence_outputs.shape[1])
 
-        assert maximizer_outputs.shape[2] == maximizer_outputs.shape[3] == \
-               correspondence_outputs.shape[2] == correspondence_outputs.shape[3] == 1
+        assert (maximizer_outputs.shape[2] == maximizer_outputs.shape[3] ==
+                correspondence_outputs.shape[2] == correspondence_outputs.shape[3] == 1)
 
         maximizer_outputs = maximizer_outputs.squeeze()  # BxCx1x1 -> BxC
         correspondence_outputs = correspondence_outputs.squeeze()  # BxCx1x1 -> BxC
@@ -159,28 +382,115 @@ class ImipsTrainer:
 
         return loss
 
-    def _train_pair(self, pair: epipolar_nn.dataloaders.pair.StereoPair) -> torch.Tensor:
-        image_1 = epipolar_nn.dataloaders.image.load_image_for_torch(pair.image_1)
-        image_2 = epipolar_nn.dataloaders.image.load_image_for_torch(pair.image_2)
-        image_1_keypoints = self._network.extract_keypoints(image_1)
-        image_2_keypoints = self._network.extract_keypoints(image_2)
+    def _train_pair(self, pair: epipolar_nn.dataloaders.pair.StereoPair, iteration: int) -> torch.Tensor:
+        # Load images up for torch
+        img_1 = epipolar_nn.dataloaders.image.load_image_for_torch(pair.image_1)
+        img_2 = epipolar_nn.dataloaders.image.load_image_for_torch(pair.image_2)
 
-        image_1_anchor_patches, image_1_corr_patches, image_1_inlier_labels, image_1_outlier_labels, \
-        image_2_anchor_patches, image_2_corr_patches, image_2_inlier_labels, image_2_outlier_labels = \
-            _generate_training_patches(
-                pair, image_1_keypoints,
-                image_2_keypoints,
-                self._network.receptive_field_diameter(),
-                self._inlier_radius,
-            )
+        # Extract the anchor keypoints with the network
+        img_1_keypoints_xy = self._network.extract_keypoints(img_1)
+        img_2_keypoints_xy = self._network.extract_keypoints(img_2)
+
+        # Find the true correspondences for each anchor keypoint
+        # img_1_correspondences_xy are the correspondences in img_2 of the anchor keypoints
+        #   in img_1 (img_1_keypoints_xy)
+        # img_2_correspondences_xy are the correspondences in img_1 of the anchor keypoints
+        #   in img_2 (img_2_keypoints_xy)
+        (img_1_correspondences_xy, img_1_correspondences_mask,
+         img_2_correspondences_xy, img_2_correspondences_mask) = ImipsTrainer._find_correspondences(
+            pair, img_1_keypoints_xy, img_2_keypoints_xy
+        )
+
+        # Log out the anchors and true correspondences
+        img_1_true_corr_img = ImipsTrainer._create_correspondence_image(pair, img_1_keypoints_xy,
+                                                                        img_1_correspondences_xy,
+                                                                        img_1_correspondences_mask)
+        img_2_true_corr_img = ImipsTrainer._create_correspondence_image(pair, img_2_correspondences_xy,
+                                                                        img_2_keypoints_xy,
+                                                                        img_2_correspondences_mask)
+        self._t_board_writer.add_image("training/Predicted Anchors in Image 1 and True Correspondences in Image 2",
+                                       img_1_true_corr_img, iteration)
+        self._t_board_writer.add_image("training/Predicted Anchors in Image 2 and True Correspondences in Image 1",
+                                       img_2_true_corr_img, iteration)
+
+        # Create the inlier/ outlier labels
+        # img_1_inlier_labels is true at an index when there is a valid, true correspondence in img_1 for the
+        #   index aligned anchor in img_2 and the anchor in img_1 is close to the true correspondence in img_1
+        # img_2_inlier_labels is true at an index when there is a valid, true correspondence in img_2 for the
+        #   index aligned anchor in img_1 and the anchor in img_2 is close to the true correspondence in img_2
+        (img_1_inlier_labels, img_1_outlier_labels,
+         img_2_inlier_labels, img_2_outlier_labels) = ImipsTrainer._label_inliers_outliers(
+            img_1_keypoints_xy, img_1_correspondences_xy, img_1_correspondences_mask,
+            img_2_keypoints_xy, img_2_correspondences_xy, img_2_correspondences_mask,
+            self._inlier_radius
+        )
+
+        apparent_inliers = (img_1_inlier_labels & img_2_inlier_labels).sum()
+        apparent_outliers = (img_1_outlier_labels | img_2_outlier_labels).sum()
+        self._t_board_writer.add_scalar("training/apparent inliers", apparent_inliers, iteration)
+        self._t_board_writer.add_scalar("training/apparent outliers", apparent_outliers, iteration)
+        # TODO: Create visualization for inliers
+
+        # Grab the neighborhoods about the keypoints and their true correspondences
+        # Note the meaning of the img_1 and img_2 prefixes changes here.
+        # img_X means the patch comes from img_X. For example, img_1_corr_patches are patches sampled from image 1
+        # surrounding img_2_correspondences_xy.
+        (img_1_anchor_patches, img_1_corr_patches,
+         img_2_anchor_patches, img_2_corr_patches) = ImipsTrainer._generate_training_patches(
+            pair,
+            img_1_keypoints_xy, img_1_correspondences_xy, img_1_correspondences_mask,
+            img_2_keypoints_xy, img_2_keypoints_xy, img_2_correspondences_mask,
+            self._network.receptive_field_diameter(),
+        )
+
+        self._t_board_writer.add_images("training/Image 1 Anchor Patches", img_1_anchor_patches / 255,
+                                        iteration)
+        self._t_board_writer.add_images("training/Image 1 Correspondence Patches", img_1_corr_patches / 255,
+                                        iteration)
+        self._t_board_writer.add_images("training/Image 2 Anchor Patches", img_2_anchor_patches / 255,
+                                        iteration)
+        self._t_board_writer.add_images("training/Image 2 Correspondence Patches", img_2_corr_patches / 255,
+                                        iteration)
 
         self._train_patches(
-            image_1_anchor_patches, image_1_corr_patches, image_1_inlier_labels, image_1_outlier_labels
+            img_1_anchor_patches, img_1_corr_patches, img_1_inlier_labels, img_1_outlier_labels
         )
         loss = self._train_patches(
-            image_2_anchor_patches, image_2_corr_patches, image_2_inlier_labels, image_2_outlier_labels
+            img_2_anchor_patches, img_2_corr_patches, img_2_inlier_labels, img_2_outlier_labels
         )
         return loss
+
+    @staticmethod
+    def _count_inliers(pair: epipolar_nn.dataloaders.pair.StereoPair,
+                       img_1_keypoints_xy: torch.Tensor, img_2_keypoints_xy: torch.Tensor,
+                       inlier_distance: int = 3) -> Tuple[torch.Tensor, torch.Tensor]:
+        (img_1_correspondences_xy, img_1_correspondences_mask,
+         img_2_correspondences_xy, img_2_correspondences_mask) = ImipsTrainer._find_correspondences(
+            pair, img_1_keypoints_xy, img_2_keypoints_xy
+        )
+
+        img_1_inliers, img_1_outliers, img_2_inliers, img_2_outliers = ImipsTrainer._label_inliers_outliers(
+            img_1_keypoints_xy, img_1_correspondences_xy, img_1_correspondences_mask,
+            img_2_keypoints_xy, img_2_correspondences_xy, img_2_correspondences_mask,
+            inlier_distance
+        )
+
+        apparent_inliers = img_1_inliers & img_2_inliers
+        num_apparent_inliers = apparent_inliers.sum()
+        apparent_inlier_img_1_keypoints_xy = img_1_keypoints_xy[:, apparent_inliers]
+
+        num_true_inliers = torch.zeros(1, device="cuda")
+
+        if num_apparent_inliers > 0:
+            max_inlier_distance = torch.tensor([inlier_distance], device="cuda")
+            unique_inlier_img_1_keypoints_xy = apparent_inlier_img_1_keypoints_xy[:, 0:1]
+            for i in range(1, int(num_apparent_inliers)):
+                test_inlier = apparent_inlier_img_1_keypoints_xy[:, i:i + 1]
+                if (torch.norm(unique_inlier_img_1_keypoints_xy - test_inlier, p=2, dim=0) > max_inlier_distance).all():
+                    unique_inlier_img_1_keypoints_xy = torch.cat((unique_inlier_img_1_keypoints_xy, test_inlier), dim=1)
+                    num_true_inliers += 1
+
+        return num_apparent_inliers, num_true_inliers
 
     def _evaluate_dataset(self, dataset: torch.utils.data.Dataset) -> Tuple[torch.Tensor, torch.Tensor]:
         num_samples = torch.tensor([len(dataset)], device="cuda")
@@ -193,25 +503,12 @@ class ImipsTrainer:
             image_1_keypoints_xy = self._network.extract_keypoints(image_1)
             image_2_keypoints_xy = self._network.extract_keypoints(image_2)
 
-            num_apparent_inliers, num_true_inliers = _count_inliers(
+            num_apparent_inliers, num_true_inliers = ImipsTrainer._count_inliers(
                 pair, image_1_keypoints_xy, image_2_keypoints_xy, self._inlier_radius
             )
             total_apparent_inliers = total_apparent_inliers + num_apparent_inliers
             total_true_inliers = total_true_inliers + num_true_inliers
         return total_apparent_inliers / num_samples, total_true_inliers / num_samples
-
-    def _load_checkpoint(self, checkpoint: dict):
-        self._optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self._network.load_state_dict(checkpoint["network_state_dict"])
-        self._inlier_radius = checkpoint["inlier_radius"]
-        for i in range(0, checkpoint["iteration"]):
-            self._next_pair()
-
-    def load_best_checkpoint(self):
-        self._load_checkpoint(torch.load(self._best_checkpoint_path))
-
-    def load_latest_checkpoint(self):
-        self._load_checkpoint(torch.load(self._latest_checkpoint_path))
 
     def train(self, iterations: int, eval_frequency: int):
         if iterations % eval_frequency != 0:
@@ -221,13 +518,14 @@ class ImipsTrainer:
         last_eval_time = time.time()
         for iteration in range(1, iterations + 1):
             curr_pair = self._next_pair()
-            curr_loss = self._train_pair(curr_pair)
+            curr_loss = self._train_pair(curr_pair, iteration)
             self._t_board_writer.add_scalar("training/loss", curr_loss, iteration)
             if iteration % eval_frequency == 0:
                 train_apparent_inliers_avg, train_true_inliers_avg = self._evaluate_dataset(self._train_eval_dataset)
                 eval_apparent_inliers_avg, eval_true_inliers_avg = self._evaluate_dataset(self._eval_dataset)
-                self._t_board_writer.add_scalar("training/apparent inliers", train_apparent_inliers_avg, iteration)
-                self._t_board_writer.add_scalar("training/true inliers", train_true_inliers_avg, iteration)
+                self._t_board_writer.add_scalar("training_evaluation/apparent inliers", train_apparent_inliers_avg,
+                                                iteration)
+                self._t_board_writer.add_scalar("training_evaluation/true inliers", train_true_inliers_avg, iteration)
                 self._t_board_writer.add_scalar("evaluation/apparent inliers", eval_apparent_inliers_avg, iteration)
                 self._t_board_writer.add_scalar("evaluation/true inliers", eval_true_inliers_avg, iteration)
                 save_info = {
@@ -236,10 +534,11 @@ class ImipsTrainer:
                     "network_state_dict": self._network.state_dict(),
                     "optimizer_state_dict": self._optimizer.state_dict(),
                     "training/loss": curr_loss,
-                    "training/apparent inliers": train_apparent_inliers_avg,
-                    "training/true inliers": train_true_inliers_avg,
+                    "training_evaluation/apparent inliers": train_apparent_inliers_avg,
+                    "training_evaluation/true inliers": train_true_inliers_avg,
                     "evaluation/apparent inliers": eval_apparent_inliers_avg,
                     "evaluation/true inliers": eval_true_inliers_avg,
+                    "seed": self._seed,
                 }
 
                 torch.save(save_info, self._latest_checkpoint_path)
@@ -252,217 +551,3 @@ class ImipsTrainer:
                 iters_per_minute = eval_frequency / ((curr_eval_time - last_eval_time) / 60)
                 self._t_board_writer.add_scalar("performance/iterations per minute", iters_per_minute, iteration)
                 last_eval_time = curr_eval_time
-
-
-def _generate_training_patches(
-        pair: epipolar_nn.dataloaders.pair.StereoPair,
-        img_1_keypoints_xy: torch.Tensor, img_2_keypoints_xy: torch.Tensor,
-        patch_diameter: int, inlier_distance: int = 3,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-           torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Given a training pair and the keypoints detected by the network for each image,
-    return the training patches for the predicted anchors and true correspondences,
-    as well as the inlier/outlier labels for each image.
-
-    The patch diameter controls the size of the returned patches. This should
-    correspond with the number of convolutions in the network. i.e.
-    patch_diameter = num_conv_layers * 2 + 1 if each layer is a 3x3 convolution.
-
-    Inlier_distance controls the labelling of inliers. The predicted anchor in one image
-    and the true correspondence of the anchor predicted in the other image must be
-    this close to be considered an inlier. If there exists a valid correspondence,
-    but the distance from the anchor to the correspondence is beyond this limit,
-    the prediction is labelled as an outlier.
-
-    Returns an eight-tuple.
-    The first four entries corresponds to the first image in the pair, and the last four entries
-    corresponds to the second image.
-    Each set has the form: (anchor patches, correspondence patches, inlier labels, outlier labels)
-    Anchor patches and correspondence patches are tensors of the form BxCxHxW
-    """
-    img_1_correspondences_xy, img_1_correspondences_mask, \
-    img_2_correspondences_xy, img_2_correspondences_mask = _find_correspondences(
-        pair, img_1_keypoints_xy, img_2_keypoints_xy
-    )
-
-    img_1_inliers, img_1_outliers, img_2_inliers, img_2_outliers = _label_inliers_outliers(
-        img_1_keypoints_xy, img_1_correspondences_xy, img_1_correspondences_mask,
-        img_2_keypoints_xy, img_2_correspondences_xy, img_2_correspondences_mask,
-        inlier_distance
-    )
-
-    img_1_kp_patches = _image_to_patch_batch(pair.image_1, img_1_keypoints_xy, patch_diameter)
-    img_1_corr_patches = torch.zeros_like(img_1_kp_patches, device="cuda")
-    img_1_corr_patches[img_2_correspondences_mask, :, :, :] = _image_to_patch_batch(
-        pair.image_1,
-        img_2_correspondences_xy[:, img_2_correspondences_mask],
-        patch_diameter
-    )
-    img_2_kp_patches = _image_to_patch_batch(pair.image_2, img_2_keypoints_xy, patch_diameter)
-    img_2_corr_patches = torch.zeros_like(img_2_kp_patches, device="cuda")
-    img_2_corr_patches[img_1_correspondences_mask, :, :, :] = _image_to_patch_batch(
-        pair.image_2,
-        img_1_correspondences_xy[:, img_1_correspondences_mask],
-        patch_diameter
-    )
-
-    # The results are returned in in two batches, one for each image that was subsampled.
-    # This is a holdover from the original work. It might make more sense to
-    # swap the kp and corr patches around in the future.
-    # img 1_kp_patches come from the anchor points detected in img 1
-    # img 1 corr patches come from the real correspondences of the anchor points detected in img 2
-    # img 2 kp patches come from the anchor points detected in img 2
-    # img 2 corr patches come from the real correspondences of the anchor points detected in img 1
-    # img_1_inliers is true at an index when there is a valid, true correspondence in img_1 for the anchor in img_2
-    #   and the anchor in img_1 is close to the true correspondence in img_1
-    # img_2_inliers is true at an index when there is a valid, true correspondence in img_2 for the anchor in img_1
-    #   and the anchor in img_2 is close to the true correspondence in img_2
-    return img_1_kp_patches, img_1_corr_patches, img_1_inliers, img_1_outliers, \
-           img_2_kp_patches, img_2_corr_patches, img_2_inliers, img_2_outliers
-
-
-def _count_inliers(pair: epipolar_nn.dataloaders.pair.StereoPair,
-                   img_1_keypoints_xy: torch.Tensor, img_2_keypoints_xy: torch.Tensor,
-                   inlier_distance: int = 3) -> Tuple[torch.Tensor, torch.Tensor]:
-    img_1_correspondences_xy, img_1_correspondences_mask, \
-    img_2_correspondences_xy, img_2_correspondences_mask = _find_correspondences(
-        pair, img_1_keypoints_xy, img_2_keypoints_xy
-    )
-
-    img_1_inliers, img_1_outliers, img_2_inliers, img_2_outliers = _label_inliers_outliers(
-        img_1_keypoints_xy, img_1_correspondences_xy, img_1_correspondences_mask,
-        img_2_keypoints_xy, img_2_correspondences_xy, img_2_correspondences_mask,
-        inlier_distance
-    )
-
-    apparent_inliers = img_1_inliers & img_2_inliers
-    num_apparent_inliers = apparent_inliers.sum()
-    apparent_inlier_img_1_keypoints_xy = img_1_keypoints_xy[:, apparent_inliers]
-
-    num_true_inliers = torch.zeros(1, device="cuda")
-
-    if num_apparent_inliers > 0:
-        max_inlier_distance = torch.tensor([inlier_distance], device="cuda")
-        unique_inlier_img_1_keypoints_xy = apparent_inlier_img_1_keypoints_xy[:, 0:1]
-        for i in range(1, int(num_apparent_inliers)):
-            test_inlier = apparent_inlier_img_1_keypoints_xy[:, i:i + 1]
-            if (torch.norm(unique_inlier_img_1_keypoints_xy - test_inlier, p=2, dim=0) > max_inlier_distance).all():
-                unique_inlier_img_1_keypoints_xy = torch.cat((unique_inlier_img_1_keypoints_xy, test_inlier), dim=1)
-                num_true_inliers += 1
-
-    return num_apparent_inliers, num_true_inliers
-
-
-def _find_correspondences(pair: epipolar_nn.dataloaders.pair.StereoPair,
-                          img_1_keypoints_xy: torch.Tensor,
-                          img_2_keypoints_xy: torch.Tensor) \
-        -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    # Convert keypoints to numpy data structures to compute the correspondences
-    # The correspondences are calculated via numpy/ opencv, and therefore are likely
-    # computed on the CPU
-    img_1_keypoints_xy_np = img_1_keypoints_xy.cpu().numpy()
-    img_2_keypoints_xy_np = img_2_keypoints_xy.cpu().numpy()
-
-    img_1_packed_correspondences_xy, img_1_correspondences_indices = pair.correspondences(
-        img_1_keypoints_xy_np,
-        inverse=False
-    )
-    img_2_packed_correspondences_xy, img_2_correspondences_indices = pair.correspondences(
-        img_2_keypoints_xy_np,
-        inverse=True
-    )
-
-    # img_1_correspondences_xy is (zero, zero).T where img_1_correspondences_mask is False
-    # unpack_correspondences returns torch tensors, this will move the data back to the GPU
-    img_1_correspondences_xy, img_1_correspondences_mask = _unpack_correspondences(
-        img_1_keypoints_xy_np,
-        img_1_packed_correspondences_xy,
-        img_1_correspondences_indices
-    )
-    img_2_correspondences_xy, img_2_correspondences_mask = _unpack_correspondences(
-        img_2_keypoints_xy_np,
-        img_2_packed_correspondences_xy,
-        img_2_correspondences_indices,
-    )
-
-    return img_1_correspondences_xy, img_1_correspondences_mask, img_2_correspondences_xy, img_2_correspondences_mask
-
-
-def _unpack_correspondences(keypoints_xy: np.ndarray, correspondences_xy: np.ndarray, correspondence_indices) -> \
-        Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Converts the correspondences from their packed form to their unpacked form.
-
-    In the packed form, the items of correspondences_xy are mapped to keypoints_xy
-    by the correspondence_indices array. Where correspondences_xy[i] matches
-    keypoints_xy[correspondence_indicies[i]].
-
-    In the unpacked form, the correspondences are matched to keypoints_xy by index alone.
-    If no correspondence exists for a given point in keypoints_xy, the resulting
-    correspondence is (zero, zero).T. The correspondence_mask is aligned with
-    keypoints_xy and unpacked_correspondences_xy such that correspondence_mask[i]
-    is True when a valid correspondence exists for keypoints_xy[i] and False otherwise.
-
-    This method takes in numpy arrays and returns torch tensors. This has the effect
-    of moving the data from RAM into the GPU.
-    """
-    unpacked_correspondences_xy = np.zeros_like(keypoints_xy)
-    unpacked_correspondences_xy[:, correspondence_indices] = correspondences_xy
-
-    correspondences_mask = np.zeros(keypoints_xy.shape[1], dtype=np.bool)
-    correspondences_mask[correspondence_indices] = True
-
-    return torch.tensor(unpacked_correspondences_xy, device="cuda"), torch.tensor(correspondences_mask, device="cuda")
-
-
-def _label_inliers_outliers(img_1_keypoints_xy: torch.Tensor, img_1_correspondences_xy: torch.Tensor,
-                            img_1_correspondences_mask: torch.Tensor, img_2_keypoints_xy: torch.Tensor,
-                            img_2_correspondences_xy: torch.Tensor, img_2_correspondences_mask: torch.Tensor,
-                            inlier_distance: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    max_inlier_distance = torch.tensor([inlier_distance], device="cuda")
-
-    # img_1_inlier_distances measures how far off the keypoints predicted in image 1
-    # are from the true correspondences of the keypoints predicted from image 2
-    img_1_inlier_distances = torch.norm((img_1_keypoints_xy - img_2_correspondences_xy), p=2, dim=0)
-    img_1_inlier_distance_mask = (img_1_inlier_distances < max_inlier_distance)
-
-    # inliers and outliers in this anchor image are determined by the true correspondences of the keypoints
-    # detected when its paired image is ran through the net as an anchor image
-    img_1_inliers = img_1_inlier_distance_mask & img_2_correspondences_mask
-    img_1_outliers = ~img_1_inlier_distance_mask & img_2_correspondences_mask
-
-    img_2_inlier_distances = torch.norm((img_2_keypoints_xy - img_1_correspondences_xy), p=2, dim=0)
-    img_2_inlier_distance_mask = img_2_inlier_distances < max_inlier_distance
-
-    img_2_inliers = img_2_inlier_distance_mask & img_1_correspondences_mask
-    img_2_outliers = ~img_2_inlier_distance_mask & img_1_correspondences_mask
-
-    return img_1_inliers, img_1_outliers, img_2_inliers, img_2_outliers
-
-
-def _image_to_patch_batch(image_np: np.ndarray, keypoints_xy: torch.Tensor, diameter: int) -> torch.Tensor:
-    """
-    Extracts keypoints_xy.shape[1] patches from image_np centered on the given keypoints.
-    Returns a tensor of diameter x diameter patches in a BxCxHxW tensor. The input image is
-    expected to be a numpy image in either HxW or HxWxC format.
-    """
-    if diameter % 2 != 1:
-        raise ValueError("diameter must be odd")
-
-    keypoints_xy = keypoints_xy.to(torch.int)
-
-    # this will copy the image from RAM to to the GPU,
-    image = epipolar_nn.dataloaders.image.load_image_for_torch(image_np)
-    radius = (diameter - 1) // 2
-
-    batch = torch.zeros((keypoints_xy.shape[1], image.shape[0], diameter, diameter), device="cuda")
-    for point_idx in range(keypoints_xy.shape[1]):
-        keypoint_x = keypoints_xy[0, point_idx]
-        keypoint_y = keypoints_xy[1, point_idx]
-        batch[point_idx, :, :, :] = image[
-                                    :,
-                                    keypoint_y - radius: keypoint_y + radius + 1,
-                                    keypoint_x - radius: keypoint_x + radius + 1
-                                    ]
-    return batch

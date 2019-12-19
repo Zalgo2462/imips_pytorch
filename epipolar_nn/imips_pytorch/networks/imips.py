@@ -45,5 +45,5 @@ class ImipsNet(torch.nn.Module, metaclass=abc.ABCMeta):
         keypoints_xy[1, :] = linear_arg_maxes // output_shape[2]
         return keypoints_xy
 
-    def forward(self, images: torch.Tensor, keepDim: bool) -> torch.Tensor:
+    def forward(self, images: torch.Tensor, keepDim: bool = False) -> torch.Tensor:
         raise NotImplementedError

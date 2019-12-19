@@ -49,7 +49,7 @@ class SimpleConv(imips.ImipsNet):
 
         self.sigmoid_layer = torch.nn.Sigmoid()
 
-    def forward(self, images: torch.Tensor, keepDim: bool) -> torch.Tensor:
+    def forward(self, images: torch.Tensor, keepDim: bool = False) -> torch.Tensor:
         # imips centers the data between [-127, 128]
         constant_bias = torch.tensor([127], device="cuda")
 

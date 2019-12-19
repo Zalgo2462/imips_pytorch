@@ -1,8 +1,8 @@
 import os
-import random
+import socket
+from datetime import datetime
 from typing import Union, Iterable
 
-import numpy
 import torch
 from torch.optim.optimizer import Optimizer as TorchOptimizer
 
@@ -20,11 +20,10 @@ def train_net():
     num_eval_samples = 50
     validation_frequency = 250  # default in imips
     learning_rate = 10e-6
-    seed = 0
+    seed = 1
 
-    numpy.random.seed(seed)
-    torch.random.manual_seed(seed)
-    random.seed(seed)
+    current_time = datetime.now().strftime('%b%d_%H-%M-%S')
+    checkpoints_dir = os.path.join(checkpoints_root, current_time + '_' + socket.gethostname())
 
     os.makedirs(checkpoints_root, exist_ok=True)
 
@@ -49,7 +48,9 @@ def train_net():
         tum_dataset,
         hpatches_dataset,
         num_eval_samples,
-        checkpoints_root
+        checkpoints_dir,
+        inlier_radius=3,
+        seed=seed
     )
     trainer.train(iterations, validation_frequency)
 
