@@ -1,7 +1,7 @@
 import os.path
 import random
 import time
-from typing import Iterator, Callable, Union, Iterable, Tuple
+from typing import Iterator, Callable, Union, Iterable, Tuple, Dict
 
 import cv2
 import numpy as np
@@ -31,7 +31,7 @@ class ImipsTrainer:
                  ):
         self._network = network
         self._optimizer = optimizer_factory(self._network.parameters())
-        self._train_dataset = train_dataset
+        self._train_dataset = train_dataset  # torch.utils.data.Subset(train_dataset, [0])
         self._train_dataset_iter = self._create_new_train_dataset_iterator()
         self._train_eval_dataset = epipolar_nn.dataloaders.random.ShuffledDataset(train_dataset, num_eval_samples)
         self._eval_dataset = epipolar_nn.dataloaders.random.ShuffledDataset(eval_dataset, num_eval_samples)
@@ -41,6 +41,7 @@ class ImipsTrainer:
         self._best_checkpoint_path = os.path.join(save_directory, "imips_best.chkpt")
         self._latest_checkpoint_path = os.path.join(save_directory, "imips_latest.chkpt")
         self._seed = seed
+        self._eps = float(np.finfo(np.float32).eps)
 
         np.random.seed(self._seed)
         torch.random.manual_seed(self._seed)
@@ -275,7 +276,7 @@ class ImipsTrainer:
 
     def _train_patches(self, maximizer_patches: torch.Tensor, correspondence_patches: torch.Tensor,
                        inlier_labels: torch.Tensor,
-                       outlier_labels: torch.Tensor) -> torch.Tensor:
+                       outlier_labels: torch.Tensor) -> Dict[str, torch.Tensor]:
 
         # comments assume maximizer_patches and correspondence_patches are both pulled from image 1 in a pair
 
@@ -315,8 +316,9 @@ class ImipsTrainer:
         assert (maximizer_outputs.shape[2] == maximizer_outputs.shape[3] ==
                 correspondence_outputs.shape[2] == correspondence_outputs.shape[3] == 1)
 
-        maximizer_outputs = maximizer_outputs.squeeze()  # BxCx1x1 -> BxC
-        correspondence_outputs = correspondence_outputs.squeeze()  # BxCx1x1 -> BxC
+        # Clamp the results since we take logs later (prevents inf/nan)
+        maximizer_outputs = maximizer_outputs.squeeze().clamp(self._eps, 1 - self._eps)  # BxCx1x1 -> BxC
+        correspondence_outputs = correspondence_outputs.squeeze().clamp(self._eps, 1 - self._eps)  # BxCx1x1 -> BxC
 
         # The goal is to maximize each channel's response to it's patch in image 1 which corresponds
         # with it's maximizing patch in image 2. If the patch which maximizes a channel's response in
@@ -334,11 +336,12 @@ class ImipsTrainer:
         aligned_outlier_index = torch.diag(outlier_labels)
 
         aligned_outlier_correspondence_scores = correspondence_outputs[aligned_outlier_index]
-        assert len(aligned_outlier_correspondence_scores.shape) == 1
 
         # A lower response to a channel's patch in image 1 which corresponds with it's maximizing patch in image 2
         # will lead to a higher loss. This is called correspondence loss by imips
         outlier_correspondence_loss = torch.sum(-1 * torch.log(aligned_outlier_correspondence_scores))
+        if outlier_correspondence_loss.nelement() == 0:
+            outlier_correspondence_loss = torch.zeros([1], device="cuda")
 
         # If a channel's maximum response is outside of a given radius about the target correspondence site, the
         # channel's response to it's maximizing patch in image 1 is minimized.
@@ -348,6 +351,8 @@ class ImipsTrainer:
         # higher loss for a channel which attains its maximum outside of a given radius
         # about it's target correspondence site. This is called outlier loss by imips.
         outlier_maximizer_loss = torch.sum(-1 * torch.log(-1 * aligned_outlier_maximizer_scores + 1))
+        if outlier_maximizer_loss.nelement() == 0:
+            outlier_maximizer_loss = torch.zeros([1], device="cuda")
 
         outlier_loss = outlier_correspondence_loss + outlier_maximizer_loss
 
@@ -358,12 +363,13 @@ class ImipsTrainer:
         aligned_inlier_index = torch.diag(inlier_labels)
 
         aligned_inlier_maximizer_scores = maximizer_outputs[aligned_inlier_index]
-        assert len(aligned_inlier_maximizer_scores.shape) == 1
 
         # A lower response to a channel's maximizing patch in image 1 wil lead to
         # a higher loss for a channel which attains its maximum inside of a given radius
         # about it's target correspondence site. This is called inlier_loss by imips.
         inlier_loss = torch.sum(-1 * torch.log(aligned_inlier_maximizer_scores))
+        if inlier_loss.nelement() == 0:
+            inlier_loss = torch.zeros([1], device="cuda")
 
         # Finally, if a channel attains its maximum response inside of a given radius
         # about it's target correspondence site, the responses of all the other channels
@@ -371,16 +377,25 @@ class ImipsTrainer:
         # equivalent: inlier_labels.unsqueeze(1).repeat(1, inlier_labels.shape[0]) - inlier_labels.diag()
         unaligned_inlier_index = aligned_inlier_index ^ inlier_labels.unsqueeze(1)
         unaligned_inlier_maximizer_scores = maximizer_outputs[unaligned_inlier_index]
+        unaligned_maximizer_loss = torch.sum(unaligned_inlier_maximizer_scores)
+        if unaligned_maximizer_loss.nelement() == 0:
+            unaligned_maximizer_loss = torch.zeros([1], device="cuda")
 
         # imips just adds the unaligned scores to the loss directly
-        loss = outlier_loss + inlier_loss + torch.sum(unaligned_inlier_maximizer_scores)
+        loss = outlier_loss + inlier_loss + unaligned_maximizer_loss
 
         # run the optimizer with the loss
         self._optimizer.zero_grad()
         loss.backward()
         self._optimizer.step()
 
-        return loss
+        return {
+            "loss": loss,
+            "outlier_correspondence_loss": outlier_correspondence_loss,
+            "outlier_maximizer_loss": outlier_maximizer_loss,
+            "inlier_maximizer_loss": inlier_loss,
+            "unaligned_maximizer_loss": unaligned_maximizer_loss,
+        }
 
     def _train_pair(self, pair: epipolar_nn.dataloaders.pair.StereoPair, iteration: int) -> torch.Tensor:
         # Load images up for torch
@@ -388,8 +403,15 @@ class ImipsTrainer:
         img_2 = epipolar_nn.dataloaders.image.load_image_for_torch(pair.image_2)
 
         # Extract the anchor keypoints with the network
-        img_1_keypoints_xy = self._network.extract_keypoints(img_1)
-        img_2_keypoints_xy = self._network.extract_keypoints(img_2)
+        img_1_keypoints_xy, img_1_responses = self._network.extract_keypoints(img_1)
+        img_2_keypoints_xy, img_2_responses = self._network.extract_keypoints(img_2)
+
+        """
+        img_1_responses = img_1_responses.unsqueeze(1)  # Convert CHW to N1HW
+        img_2_responses = img_2_responses.unsqueeze(1)
+        self._t_board_writer.add_images("training/Image 1 Responses", img_1_responses, iteration)
+        self._t_board_writer.add_images("training/Image 2 Responses", img_2_responses, iteration)
+        """
 
         # Find the true correspondences for each anchor keypoint
         # img_1_correspondences_xy are the correspondences in img_2 of the anchor keypoints
@@ -455,10 +477,20 @@ class ImipsTrainer:
         self._train_patches(
             img_1_anchor_patches, img_1_corr_patches, img_1_inlier_labels, img_1_outlier_labels
         )
-        loss = self._train_patches(
+
+        losses = self._train_patches(
             img_2_anchor_patches, img_2_corr_patches, img_2_inlier_labels, img_2_outlier_labels
         )
-        return loss
+
+        self._t_board_writer.add_scalar("training/loss", losses["loss"], iteration)
+        self._t_board_writer.add_scalar("training/Outlier Correspondence Loss", losses["outlier_correspondence_loss"],
+                                        iteration)
+        self._t_board_writer.add_scalar("training/Outlier Maximizer Loss", losses["outlier_maximizer_loss"], iteration)
+        self._t_board_writer.add_scalar("training/Inlier Maximizer Loss", losses["inlier_maximizer_loss"], iteration)
+        self._t_board_writer.add_scalar("training/Unaligned Maximizer Loss", losses["unaligned_maximizer_loss"],
+                                        iteration)
+
+        return losses["loss"]
 
     @staticmethod
     def _count_inliers(pair: epipolar_nn.dataloaders.pair.StereoPair,
@@ -500,8 +532,8 @@ class ImipsTrainer:
             pair: epipolar_nn.dataloaders.pair.StereoPair = pair
             image_1 = epipolar_nn.dataloaders.image.load_image_for_torch(pair.image_1)
             image_2 = epipolar_nn.dataloaders.image.load_image_for_torch(pair.image_2)
-            image_1_keypoints_xy = self._network.extract_keypoints(image_1)
-            image_2_keypoints_xy = self._network.extract_keypoints(image_2)
+            image_1_keypoints_xy, _ = self._network.extract_keypoints(image_1)
+            image_2_keypoints_xy, _ = self._network.extract_keypoints(image_2)
 
             num_apparent_inliers, num_true_inliers = ImipsTrainer._count_inliers(
                 pair, image_1_keypoints_xy, image_2_keypoints_xy, self._inlier_radius
@@ -519,7 +551,6 @@ class ImipsTrainer:
         for iteration in range(1, iterations + 1):
             curr_pair = self._next_pair()
             curr_loss = self._train_pair(curr_pair, iteration)
-            self._t_board_writer.add_scalar("training/loss", curr_loss, iteration)
             if iteration % eval_frequency == 0:
                 train_apparent_inliers_avg, train_true_inliers_avg = self._evaluate_dataset(self._train_eval_dataset)
                 eval_apparent_inliers_avg, eval_true_inliers_avg = self._evaluate_dataset(self._eval_dataset)
