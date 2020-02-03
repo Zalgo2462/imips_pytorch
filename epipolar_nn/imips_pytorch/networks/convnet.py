@@ -49,6 +49,13 @@ class SimpleConv(imips.ImipsNet):
 
         self.sigmoid_layer = torch.nn.Sigmoid()
 
+        def init_weights(module: torch.nn.Module):
+            if type(module) in [torch.nn.Conv2d]:
+                torch.nn.init.xavier_uniform_(module.weight, gain=torch.nn.init.calculate_gain('leaky_relu', 0.2))
+                torch.nn.init.constant_(module.bias, 0)
+
+        self.conv_layers.apply(init_weights)
+
     def forward(self, images: torch.Tensor, keepDim: bool = False) -> torch.Tensor:
         # imips centers the data between [-127, 128]
         constant_bias = torch.tensor([127], device="cuda")

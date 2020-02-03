@@ -41,7 +41,8 @@ class ImipsTrainer:
         self._best_checkpoint_path = os.path.join(save_directory, "imips_best.chkpt")
         self._latest_checkpoint_path = os.path.join(save_directory, "imips_latest.chkpt")
         self._seed = seed
-        self._eps = float(np.finfo(np.float32).eps)
+        # self._eps = float(np.finfo(np.float32).eps) # torch.log(_eps) = -15.94
+        self._eps = torch.tensor(1e-4).cuda()  # suggested by imips author, torch.log(_eps) = -9.2103
 
         np.random.seed(self._seed)
         torch.random.manual_seed(self._seed)
@@ -84,7 +85,8 @@ class ImipsTrainer:
     # ################ TRAINING ################
 
     @staticmethod
-    def _unpack_correspondences(keypoints_xy: np.ndarray, correspondences_xy: np.ndarray, correspondence_indices) -> \
+    def _unpack_correspondences(keypoints_xy: np.ndarray, correspondences_xy: np.ndarray,
+                                correspondence_indices: np.ndarray) -> \
             Tuple[torch.Tensor, torch.Tensor]:
         """
         Converts the correspondences from their packed form to their unpacked form.
@@ -122,6 +124,7 @@ class ImipsTrainer:
         img_1_keypoints_xy_np = img_1_keypoints_xy.cpu().numpy()
         img_2_keypoints_xy_np = img_2_keypoints_xy.cpu().numpy()
 
+        # img_1_packed_correspondences_xy are points in img_2 which correspond to the given keypoints in img_1
         img_1_packed_correspondences_xy, img_1_correspondences_indices = pair.correspondences(
             img_1_keypoints_xy_np,
             inverse=False
@@ -274,6 +277,90 @@ class ImipsTrainer:
 
         return img_1_kp_patches, img_1_corr_patches, img_2_kp_patches, img_2_corr_patches
 
+    @staticmethod
+    def _loss(maximizer_outputs: torch.Tensor, correspondence_outputs: torch.Tensor,
+              inlier_labels: torch.Tensor, outlier_labels: torch.Tensor, epsilon: torch.Tensor) -> Tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # maximizer_outputs: BxCx1x1 where B == C
+        # correspondence_outputs: BxCx1x1 where B == C
+
+        assert (maximizer_outputs.shape[0] == maximizer_outputs.shape[1] ==
+                correspondence_outputs.shape[0] == correspondence_outputs.shape[1])
+
+        assert (maximizer_outputs.shape[2] == maximizer_outputs.shape[3] ==
+                correspondence_outputs.shape[2] == correspondence_outputs.shape[3] == 1)
+
+        # Clamp the results since we take logs later (prevents inf/nan)
+        maximizer_outputs = maximizer_outputs.squeeze()  # BxCx1x1 -> BxC
+        correspondence_outputs = correspondence_outputs.squeeze()  # BxCx1x1 -> BxC
+
+        # The goal is to maximize each channel's response to it's patch in image 1 which corresponds
+        # with it's maximizing patch in image 2. If the patch which maximizes a channel's response in
+        # image 1 is within a given radius of the patch in image 1 which corresponds
+        # with the channel's maximizing patch in image 2, the channel is assigned a loss of 0.
+        # Otherwise, if the maximizing patch for a channel is outside of this radius, the channel's loss is
+        # set to maximize the channel's response to the patch in image 1 which corresponds
+        # with the channel's maximizing patch in image 2.
+        #
+        # Research note: why do we allow the maximum response to be within a radius? Why complicate the loss
+        # this way? Maybe try always maximizing each channel's response to the patch in image 1 which
+        # corresponds with the channel's maximizing patch in image 2.
+
+        # grabs the outlier responses where the batch index and channel index align.
+        aligned_outlier_index = torch.diag(outlier_labels)
+
+        aligned_outlier_correspondence_scores = correspondence_outputs[aligned_outlier_index]
+
+        # A lower response to a channel's patch in image 1 which corresponds with it's maximizing patch in image 2
+        # will lead to a higher loss. This is called correspondence loss by imips
+        outlier_correspondence_loss = torch.sum(-1 * torch.log(aligned_outlier_correspondence_scores + epsilon))
+        if outlier_correspondence_loss.nelement() == 0:
+            outlier_correspondence_loss = torch.zeros([1], device="cuda")
+
+        # If a channel's maximum response is outside of a given radius about the target correspondence site, the
+        # channel's response to it's maximizing patch in image 1 is minimized.
+        aligned_outlier_maximizer_scores = maximizer_outputs[aligned_outlier_index]
+
+        # A higher response to a channel's maximizing patch in image 1 will lead to a
+        # higher loss for a channel which attains its maximum outside of a given radius
+        # about it's target correspondence site. This is called outlier loss by imips.
+        outlier_maximizer_loss = torch.sum(
+            -1 * torch.log(torch.max(-1 * aligned_outlier_maximizer_scores + 1, epsilon)))
+        if outlier_maximizer_loss.nelement() == 0:
+            outlier_maximizer_loss = torch.zeros([1], device="cuda")
+
+        outlier_loss = outlier_correspondence_loss + outlier_maximizer_loss
+
+        # If a channel's maximum response is inside of a given radius about the target correspondence site, the
+        # chanel's response to it's maximizing patch in image 1 is maximized.
+
+        # grabs the inlier responses where the batch index and channel index align.
+        aligned_inlier_index = torch.diag(inlier_labels)
+
+        aligned_inlier_maximizer_scores = maximizer_outputs[aligned_inlier_index]
+
+        # A lower response to a channel's maximizing patch in image 1 wil lead to
+        # a higher loss for a channel which attains its maximum inside of a given radius
+        # about it's target correspondence site. This is called inlier_loss by imips.
+        inlier_loss = torch.sum(-1 * torch.log(aligned_inlier_maximizer_scores + epsilon))
+        if inlier_loss.nelement() == 0:
+            inlier_loss = torch.zeros([1], device="cuda")
+
+        # Finally, if a channel attains its maximum response inside of a given radius
+        # about it's target correspondence site, the responses of all the other channels
+        # to it's maximizing patch are minimized.
+        # equivalent: inlier_labels.unsqueeze(1).repeat(1, inlier_labels.shape[0]) - inlier_labels.diag()
+        unaligned_inlier_index = aligned_inlier_index ^ inlier_labels.unsqueeze(1)
+        unaligned_inlier_maximizer_scores = maximizer_outputs[unaligned_inlier_index]
+        unaligned_maximizer_loss = torch.sum(unaligned_inlier_maximizer_scores)
+        if unaligned_maximizer_loss.nelement() == 0:
+            unaligned_maximizer_loss = torch.zeros([1], device="cuda")
+
+        # imips just adds the unaligned scores to the loss directly
+        loss = outlier_loss + inlier_loss + unaligned_maximizer_loss
+
+        return loss, outlier_correspondence_loss, inlier_loss, outlier_maximizer_loss, unaligned_maximizer_loss
+
     def _train_patches(self, maximizer_patches: torch.Tensor, correspondence_patches: torch.Tensor,
                        inlier_labels: torch.Tensor,
                        outlier_labels: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -305,84 +392,13 @@ class ImipsTrainer:
         assert (self._network.receptive_field_diameter() == maximizer_patches.shape[2] == maximizer_patches.shape[3] ==
                 correspondence_patches.shape[2] == correspondence_patches.shape[3])
 
-        # maximizer_outputs: BxCx1x1 where B == C
-        # correspondence_outputs: BxCx1x1 where B == C
         maximizer_outputs: torch.Tensor = self._network(maximizer_patches, False)
         correspondence_outputs: torch.Tensor = self._network(correspondence_patches, False)
 
-        assert (maximizer_outputs.shape[0] == maximizer_outputs.shape[1] ==
-                correspondence_outputs.shape[0] == correspondence_outputs.shape[1])
-
-        assert (maximizer_outputs.shape[2] == maximizer_outputs.shape[3] ==
-                correspondence_outputs.shape[2] == correspondence_outputs.shape[3] == 1)
-
-        # Clamp the results since we take logs later (prevents inf/nan)
-        maximizer_outputs = maximizer_outputs.squeeze().clamp(self._eps, 1 - self._eps)  # BxCx1x1 -> BxC
-        correspondence_outputs = correspondence_outputs.squeeze().clamp(self._eps, 1 - self._eps)  # BxCx1x1 -> BxC
-
-        # The goal is to maximize each channel's response to it's patch in image 1 which corresponds
-        # with it's maximizing patch in image 2. If the patch which maximizes a channel's response in
-        # image 1 is within a given radius of the patch in image 1 which corresponds
-        # with the channel's maximizing patch in image 2, the channel is assigned a loss of 0.
-        # Otherwise, if the maximizing patch for a channel is outside of this radius, the channel's loss is
-        # set to maximize the channel's response to the patch in image 1 which corresponds
-        # with the channel's maximizing patch in image 2.
-        #
-        # Research note: why do we allow the maximum response to be within a radius? Why complicate the loss
-        # this way? Maybe try always maximizing each channel's response to the patch in image 1 which
-        # corresponds with the channel's maximizing patch in image 2.
-
-        # grabs the outlier responses where the batch index and channel index align.
-        aligned_outlier_index = torch.diag(outlier_labels)
-
-        aligned_outlier_correspondence_scores = correspondence_outputs[aligned_outlier_index]
-
-        # A lower response to a channel's patch in image 1 which corresponds with it's maximizing patch in image 2
-        # will lead to a higher loss. This is called correspondence loss by imips
-        outlier_correspondence_loss = torch.sum(-1 * torch.log(aligned_outlier_correspondence_scores))
-        if outlier_correspondence_loss.nelement() == 0:
-            outlier_correspondence_loss = torch.zeros([1], device="cuda")
-
-        # If a channel's maximum response is outside of a given radius about the target correspondence site, the
-        # channel's response to it's maximizing patch in image 1 is minimized.
-        aligned_outlier_maximizer_scores = maximizer_outputs[aligned_outlier_index]
-
-        # A higher response to a channel's maximizing patch in image 1 will lead to a
-        # higher loss for a channel which attains its maximum outside of a given radius
-        # about it's target correspondence site. This is called outlier loss by imips.
-        outlier_maximizer_loss = torch.sum(-1 * torch.log(-1 * aligned_outlier_maximizer_scores + 1))
-        if outlier_maximizer_loss.nelement() == 0:
-            outlier_maximizer_loss = torch.zeros([1], device="cuda")
-
-        outlier_loss = outlier_correspondence_loss + outlier_maximizer_loss
-
-        # If a channel's maximum response is inside of a given radius about the target correspondence site, the
-        # chanel's response to it's maximizing patch in image 1 is maximized.
-
-        # grabs the inlier responses where the batch index and channel index align.
-        aligned_inlier_index = torch.diag(inlier_labels)
-
-        aligned_inlier_maximizer_scores = maximizer_outputs[aligned_inlier_index]
-
-        # A lower response to a channel's maximizing patch in image 1 wil lead to
-        # a higher loss for a channel which attains its maximum inside of a given radius
-        # about it's target correspondence site. This is called inlier_loss by imips.
-        inlier_loss = torch.sum(-1 * torch.log(aligned_inlier_maximizer_scores))
-        if inlier_loss.nelement() == 0:
-            inlier_loss = torch.zeros([1], device="cuda")
-
-        # Finally, if a channel attains its maximum response inside of a given radius
-        # about it's target correspondence site, the responses of all the other channels
-        # to it's maximizing patch are minimized. (Kind of...)
-        # equivalent: inlier_labels.unsqueeze(1).repeat(1, inlier_labels.shape[0]) - inlier_labels.diag()
-        unaligned_inlier_index = aligned_inlier_index ^ inlier_labels.unsqueeze(1)
-        unaligned_inlier_maximizer_scores = maximizer_outputs[unaligned_inlier_index]
-        unaligned_maximizer_loss = torch.sum(unaligned_inlier_maximizer_scores)
-        if unaligned_maximizer_loss.nelement() == 0:
-            unaligned_maximizer_loss = torch.zeros([1], device="cuda")
-
-        # imips just adds the unaligned scores to the loss directly
-        loss = outlier_loss + inlier_loss + unaligned_maximizer_loss
+        loss, outlier_correspondence_loss, inlier_loss, \
+        outlier_maximizer_loss, unaligned_maximizer_loss = ImipsTrainer._loss(
+            maximizer_outputs, correspondence_outputs, inlier_labels, outlier_labels, self._eps
+        )
 
         # run the optimizer with the loss
         self._optimizer.zero_grad()
@@ -392,8 +408,8 @@ class ImipsTrainer:
         return {
             "loss": loss,
             "outlier_correspondence_loss": outlier_correspondence_loss,
-            "outlier_maximizer_loss": outlier_maximizer_loss,
             "inlier_maximizer_loss": inlier_loss,
+            "outlier_maximizer_loss": outlier_maximizer_loss,
             "unaligned_maximizer_loss": unaligned_maximizer_loss,
         }
 
@@ -461,7 +477,8 @@ class ImipsTrainer:
          img_2_anchor_patches, img_2_corr_patches) = ImipsTrainer._generate_training_patches(
             pair,
             img_1_keypoints_xy, img_1_correspondences_xy, img_1_correspondences_mask,
-            img_2_keypoints_xy, img_2_keypoints_xy, img_2_correspondences_mask,
+            img_2_keypoints_xy, img_2_correspondences_xy, img_2_correspondences_mask,
+            # TODO: changed param 5 from keypoints to correspondences d'oh!
             self._network.receptive_field_diameter(),
         )
 

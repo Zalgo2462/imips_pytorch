@@ -16,9 +16,9 @@ import epipolar_nn.imips_pytorch.train
 def train_net():
     data_root = "./data"
     checkpoints_root = "./checkpoints/imips"
-    iterations = 100000  # default in imips. TUM train_dataset has 2336234 pairs ...
+    iterations = 100000  # 100000  # default in imips. TUM train_dataset has 2336234 pairs ...
     num_eval_samples = 50
-    validation_frequency = 250  # default in imips
+    validation_frequency = 250  # 250  # default in imips
     learning_rate = 10e-6
     seed = 1
 
@@ -53,6 +53,7 @@ def train_net():
         seed=seed
     )
     trainer.train(iterations, validation_frequency)
+    print("done")
 
 
 if __name__ == "__main__":
