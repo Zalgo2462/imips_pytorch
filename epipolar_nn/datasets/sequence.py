@@ -19,6 +19,9 @@ class FileListImageSequence(ImageSequence):
         new_paths = [x for x in self._file_paths if filter_map(x)]
         return FileListImageSequence(new_paths, self._convert_to_grayscale)
 
+    def file_name(self, index: int) -> str:
+        return self._file_paths[index]
+
     def __getitem__(self, index):
         if isinstance(index, int):
             if self._convert_to_grayscale:

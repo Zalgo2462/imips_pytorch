@@ -7,7 +7,7 @@ import torch
 from torch.optim.optimizer import Optimizer as TorchOptimizer
 
 import epipolar_nn.datasets.hpatches
-import epipolar_nn.datasets.tum
+import epipolar_nn.datasets.tum_mono
 import epipolar_nn.imips_pytorch.models.convnet
 import epipolar_nn.imips_pytorch.models.imips
 import epipolar_nn.imips_pytorch.train
@@ -27,7 +27,7 @@ def train_net():
 
     os.makedirs(checkpoints_dir, exist_ok=True)
 
-    tum_dataset = epipolar_nn.datasets.tum.TUMMonocularStereoPairs(root=data_root, train=True, download=True)
+    tum_dataset = epipolar_nn.datasets.tum_mono.TUMMonocularStereoPairs(root=data_root, train=True, download=True)
     hpatches_dataset = epipolar_nn.datasets.hpatches.HPatchesSequencesStereoPairs(
         root=data_root, train=False, download=True
     )

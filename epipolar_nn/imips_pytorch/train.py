@@ -12,7 +12,7 @@ from torch.optim.optimizer import Optimizer as TorchOptimizer
 import epipolar_nn.data.pairs
 import epipolar_nn.datasets.image
 import epipolar_nn.datasets.shuffle
-import epipolar_nn.datasets.tum
+import epipolar_nn.datasets.tum_mono
 import epipolar_nn.imips_pytorch.models.convnet
 import epipolar_nn.imips_pytorch.models.imips
 
@@ -72,7 +72,7 @@ class ImipsTrainer:
 
     def _create_new_train_dataset_iterator(self) -> Iterator[
         epipolar_nn.data.pairs.CorrespondencePair]:
-        # reshuffle the original dataset and begin iterating one pair at a time
+        # reshuffle the original dataset_name and begin iterating one pair at a time
         shuffled_dataset = epipolar_nn.datasets.shuffle.ShuffledDataset(self._train_dataset)
         return iter(torch.utils.data.DataLoader(shuffled_dataset, batch_size=None, collate_fn=lambda x: x))
 

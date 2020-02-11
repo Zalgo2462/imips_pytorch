@@ -61,8 +61,8 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
             with open(os.path.join(seq_path, "overlap.pickle"), 'rb') as overlap_file:
                 seq_overlap = pickle.load(overlap_file)
 
-            seq_pair_generator = pairs.KLTPairGenerator(seq_name, img_seq, self._tracker, seq_overlap,
-                                                        minimum_KLT_overlap)
+            seq_pair_generator = klt.KLTPairGenerator(seq_name, img_seq, self._tracker, seq_overlap,
+                                                      minimum_KLT_overlap)
             self._stereo_pair_generators.append(seq_pair_generator)
             self._generator_len_cum_sum.append(len(seq_pair_generator))
 
