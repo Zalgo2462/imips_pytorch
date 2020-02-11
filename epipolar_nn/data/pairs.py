@@ -1,16 +1,13 @@
 import bisect
+from abc import ABC
 from typing import Sequence, Tuple
 
 import numpy as np
 
-from . import klt
+from epipolar_nn.data import klt
 
 
-class StereoPair:
-
-    def correspondences(self, pixels_xy: np.ndarray, inverse: bool = False) -> Tuple[np.ndarray, np.ndarray]:
-        raise NotImplementedError()
-
+class ImagePair(ABC):
     @property
     def image_1(self) -> np.ndarray:
         raise NotImplementedError()
@@ -24,7 +21,13 @@ class StereoPair:
         raise NotImplementedError()
 
 
-class HomographyPair(StereoPair):
+class CorrespondencePair(ImagePair, ABC):
+
+    def correspondences(self, pixels_xy: np.ndarray, inverse: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+        raise NotImplementedError()
+
+
+class HomographyPair(CorrespondencePair):
     def __init__(self, image_1: np.ndarray, image_2: np.ndarray,
                  homography: np.ndarray, name: str):
         self.__image_1 = image_1
@@ -64,7 +67,7 @@ class HomographyPair(StereoPair):
         return self.__name
 
 
-class KLTPair(StereoPair):
+class KLTPair(CorrespondencePair):
 
     def __init__(self, images: Sequence[np.ndarray], tracker: klt.Tracker, name: str):
         self.__sequence = list(images)  # Ensure the sequence is loaded into memory
@@ -125,7 +128,7 @@ class KLTPairGenerator:
     def __len__(self):
         return self._overlapped_frames_cum_sum[-1]
 
-    def __getitem__(self, index: int) -> StereoPair:
+    def __getitem__(self, index: int) -> CorrespondencePair:
         if index > len(self):
             raise IndexError()
 

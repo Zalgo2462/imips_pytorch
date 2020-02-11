@@ -9,18 +9,18 @@ import torch.utils.data
 import torch.utils.tensorboard
 from torch.optim.optimizer import Optimizer as TorchOptimizer
 
-import epipolar_nn.dataloaders.image
-import epipolar_nn.dataloaders.pair
-import epipolar_nn.dataloaders.random
-import epipolar_nn.dataloaders.tum
-import epipolar_nn.imips_pytorch.networks.convnet
-import epipolar_nn.imips_pytorch.networks.imips
+import epipolar_nn.data.pairs
+import epipolar_nn.datasets.image
+import epipolar_nn.datasets.shuffle
+import epipolar_nn.datasets.tum
+import epipolar_nn.imips_pytorch.models.convnet
+import epipolar_nn.imips_pytorch.models.imips
 
 
 class ImipsTrainer:
 
     def __init__(self,
-                 network: epipolar_nn.imips_pytorch.networks.imips.ImipsNet,
+                 network: epipolar_nn.imips_pytorch.models.imips.ImipsNet,
                  optimizer_factory: Callable[[Union[Iterable[torch.Tensor], dict]], TorchOptimizer],
                  train_dataset: torch.utils.data.Dataset,
                  eval_dataset: torch.utils.data.Dataset,
@@ -33,8 +33,8 @@ class ImipsTrainer:
         self._optimizer = optimizer_factory(self._network.parameters())
         self._train_dataset = train_dataset  # torch.utils.data.Subset(train_dataset, [0])
         self._train_dataset_iter = self._create_new_train_dataset_iterator()
-        self._train_eval_dataset = epipolar_nn.dataloaders.random.ShuffledDataset(train_dataset, num_eval_samples)
-        self._eval_dataset = epipolar_nn.dataloaders.random.ShuffledDataset(eval_dataset, num_eval_samples)
+        self._train_eval_dataset = epipolar_nn.datasets.shuffle.ShuffledDataset(train_dataset, num_eval_samples)
+        self._eval_dataset = epipolar_nn.datasets.shuffle.ShuffledDataset(eval_dataset, num_eval_samples)
         self._inlier_radius = inlier_radius
         self._best_eval_inlier_score = torch.tensor([0], device="cuda")
         self._t_board_writer = torch.utils.tensorboard.SummaryWriter()
@@ -70,12 +70,13 @@ class ImipsTrainer:
 
     # ################ DATASET ITERATION ################
 
-    def _create_new_train_dataset_iterator(self) -> Iterator[epipolar_nn.dataloaders.pair.StereoPair]:
+    def _create_new_train_dataset_iterator(self) -> Iterator[
+        epipolar_nn.data.pairs.CorrespondencePair]:
         # reshuffle the original dataset and begin iterating one pair at a time
-        shuffled_dataset = epipolar_nn.dataloaders.random.ShuffledDataset(self._train_dataset)
+        shuffled_dataset = epipolar_nn.datasets.shuffle.ShuffledDataset(self._train_dataset)
         return iter(torch.utils.data.DataLoader(shuffled_dataset, batch_size=None, collate_fn=lambda x: x))
 
-    def _next_pair(self) -> epipolar_nn.dataloaders.pair.StereoPair:
+    def _next_pair(self) -> epipolar_nn.data.pairs.CorrespondencePair:
         try:
             return next(self._train_dataset_iter)
         except StopIteration:
@@ -114,7 +115,7 @@ class ImipsTrainer:
                                                                                       device="cuda")
 
     @staticmethod
-    def _find_correspondences(pair: epipolar_nn.dataloaders.pair.StereoPair,
+    def _find_correspondences(pair: epipolar_nn.data.pairs.CorrespondencePair,
                               img_1_keypoints_xy: torch.Tensor,
                               img_2_keypoints_xy: torch.Tensor) \
             -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -151,7 +152,7 @@ class ImipsTrainer:
                 img_2_correspondences_xy, img_2_correspondences_mask)
 
     @staticmethod
-    def _create_correspondence_image(pair: epipolar_nn.dataloaders.pair.StereoPair, image_1_pixels_xy: torch.Tensor,
+    def _create_correspondence_image(pair: epipolar_nn.data.pairs.CorrespondencePair, image_1_pixels_xy: torch.Tensor,
                                      image_2_pixels_xy: torch.Tensor,
                                      correspondence_mask: torch.Tensor) -> torch.Tensor:
         image_1_pixels_xy = image_1_pixels_xy.cpu()
@@ -209,7 +210,7 @@ class ImipsTrainer:
         keypoints_xy = keypoints_xy.to(torch.int)
 
         # this will copy the image from RAM to to the GPU,
-        image = epipolar_nn.dataloaders.image.load_image_for_torch(image_np)
+        image = epipolar_nn.datasets.image.load_image_for_torch(image_np)
         radius = (diameter - 1) // 2
 
         batch = torch.zeros((keypoints_xy.shape[1], image.shape[0], diameter, diameter), device="cuda")
@@ -225,7 +226,7 @@ class ImipsTrainer:
 
     @staticmethod
     def _generate_training_patches(
-            pair: epipolar_nn.dataloaders.pair.StereoPair,
+            pair: epipolar_nn.data.pairs.CorrespondencePair,
             img_1_keypoints_xy: torch.Tensor, img_1_correspondences_xy, img_1_correspondences_mask,
             img_2_keypoints_xy: torch.Tensor, img_2_correspondences_xy, img_2_correspondences_mask,
             patch_diameter: int,
@@ -413,10 +414,10 @@ class ImipsTrainer:
             "unaligned_maximizer_loss": unaligned_maximizer_loss,
         }
 
-    def _train_pair(self, pair: epipolar_nn.dataloaders.pair.StereoPair, iteration: int) -> torch.Tensor:
+    def _train_pair(self, pair: epipolar_nn.data.pairs.CorrespondencePair, iteration: int) -> torch.Tensor:
         # Load images up for torch
-        img_1 = epipolar_nn.dataloaders.image.load_image_for_torch(pair.image_1)
-        img_2 = epipolar_nn.dataloaders.image.load_image_for_torch(pair.image_2)
+        img_1 = epipolar_nn.datasets.image.load_image_for_torch(pair.image_1)
+        img_2 = epipolar_nn.datasets.image.load_image_for_torch(pair.image_2)
 
         # Extract the anchor keypoints with the network
         img_1_keypoints_xy, img_1_responses = self._network.extract_keypoints(img_1)
@@ -510,7 +511,7 @@ class ImipsTrainer:
         return losses["loss"]
 
     @staticmethod
-    def _count_inliers(pair: epipolar_nn.dataloaders.pair.StereoPair,
+    def _count_inliers(pair: epipolar_nn.data.pairs.CorrespondencePair,
                        img_1_keypoints_xy: torch.Tensor, img_2_keypoints_xy: torch.Tensor,
                        inlier_distance: int = 3) -> Tuple[torch.Tensor, torch.Tensor]:
         (img_1_correspondences_xy, img_1_correspondences_mask,
@@ -546,9 +547,9 @@ class ImipsTrainer:
         total_apparent_inliers = torch.tensor([0], device="cuda")
         total_true_inliers = torch.tensor([0], device="cuda")
         for pair in dataset:
-            pair: epipolar_nn.dataloaders.pair.StereoPair = pair
-            image_1 = epipolar_nn.dataloaders.image.load_image_for_torch(pair.image_1)
-            image_2 = epipolar_nn.dataloaders.image.load_image_for_torch(pair.image_2)
+            pair: epipolar_nn.data.pairs.CorrespondencePair = pair
+            image_1 = epipolar_nn.datasets.image.load_image_for_torch(pair.image_1)
+            image_2 = epipolar_nn.datasets.image.load_image_for_torch(pair.image_2)
             image_1_keypoints_xy, _ = self._network.extract_keypoints(image_1)
             image_2_keypoints_xy, _ = self._network.extract_keypoints(image_2)
 

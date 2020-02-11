@@ -7,10 +7,11 @@ import numpy as np
 import torch.utils.data
 import torchvision.datasets.utils as tv_data
 
-from . import sequence, pair
+from epipolar_nn.data import pairs
+from epipolar_nn.datasets import sequence
 
 
-class HPatchesPair(pair.HomographyPair):
+class HPatchesPair(pairs.HomographyPair):
     """Represents a stereo pair from HPatches"""
 
     def __init__(self: 'HPatchesPair', image_1: np.ndarray, image_2: np.ndarray, homography: np.ndarray,

@@ -6,10 +6,10 @@ from typing import Union, Iterable
 import torch
 from torch.optim.optimizer import Optimizer as TorchOptimizer
 
-import epipolar_nn.dataloaders.hpatches
-import epipolar_nn.dataloaders.tum
-import epipolar_nn.imips_pytorch.networks.convnet
-import epipolar_nn.imips_pytorch.networks.imips
+import epipolar_nn.datasets.hpatches
+import epipolar_nn.datasets.tum
+import epipolar_nn.imips_pytorch.models.convnet
+import epipolar_nn.imips_pytorch.models.imips
 import epipolar_nn.imips_pytorch.train
 
 
@@ -27,15 +27,15 @@ def train_net():
 
     os.makedirs(checkpoints_dir, exist_ok=True)
 
-    tum_dataset = epipolar_nn.dataloaders.tum.TUMMonocularStereoPairs(root=data_root, train=True, download=True)
-    hpatches_dataset = epipolar_nn.dataloaders.hpatches.HPatchesSequencesStereoPairs(
+    tum_dataset = epipolar_nn.datasets.tum.TUMMonocularStereoPairs(root=data_root, train=True, download=True)
+    hpatches_dataset = epipolar_nn.datasets.hpatches.HPatchesSequencesStereoPairs(
         root=data_root, train=False, download=True
     )
 
     def adam_optimizer_factory(parameters: Union[Iterable[torch.Tensor], dict]) -> TorchOptimizer:
         return torch.optim.Adam(parameters, learning_rate)
 
-    network: epipolar_nn.imips_pytorch.networks.imips.ImipsNet = epipolar_nn.imips_pytorch.networks.convnet.SimpleConv(
+    network: epipolar_nn.imips_pytorch.models.imips.ImipsNet = epipolar_nn.imips_pytorch.models.convnet.SimpleConv(
         num_convolutions=14,
         input_channels=1,
         output_channels=128,

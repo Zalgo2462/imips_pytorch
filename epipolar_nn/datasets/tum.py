@@ -7,7 +7,8 @@ from typing import Optional, List
 import docker
 import torch.utils.data
 
-from . import klt, sequence, pair
+from epipolar_nn.data import pairs, klt
+from epipolar_nn.datasets import sequence
 
 
 class TUMMonocularStereoPairs(torch.utils.data.Dataset):
@@ -60,8 +61,8 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
             with open(os.path.join(seq_path, "overlap.pickle"), 'rb') as overlap_file:
                 seq_overlap = pickle.load(overlap_file)
 
-            seq_pair_generator = pair.KLTPairGenerator(seq_name, img_seq, self._tracker, seq_overlap,
-                                                       minimum_KLT_overlap)
+            seq_pair_generator = pairs.KLTPairGenerator(seq_name, img_seq, self._tracker, seq_overlap,
+                                                        minimum_KLT_overlap)
             self._stereo_pair_generators.append(seq_pair_generator)
             self._generator_len_cum_sum.append(len(seq_pair_generator))
 
@@ -71,7 +72,7 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
     def __len__(self) -> int:
         return self._generator_len_cum_sum[-1]
 
-    def __getitem__(self, index: int) -> pair.StereoPair:
+    def __getitem__(self, index: int) -> pairs.CorrespondencePair:
         if index > len(self):
             raise IndexError()
 
