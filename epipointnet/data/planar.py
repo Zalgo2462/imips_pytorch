@@ -2,7 +2,7 @@ from typing import Tuple
 
 import numpy as np
 
-from epipolar_nn.data.pairs import CorrespondencePair
+from epipointnet.data.pairs import CorrespondencePair
 
 
 class HomographyPair(CorrespondencePair):

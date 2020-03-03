@@ -1,6 +1,9 @@
 import numpy as np
 
-from epipolar_nn.data.pairs import FundamentalMatrixPair
+from epipointnet.data.pairs import FundamentalMatrixPair
+
+PINV_F_MAT_ALGORITHM = 0
+STD_STEREO_F_MAT_ALGORITHM = 1
 
 
 class PinvFundamentalMatrixPair(FundamentalMatrixPair):
@@ -60,11 +63,16 @@ class StdStereoFundamentalMatrixPair(FundamentalMatrixPair):
         self._image_2 = image_2
         self._name = name
 
+        self.baseline_1_2 = image_1_extrinsic_matrix @ np.vstack((image_2_pose_matrix[:, -1, np.newaxis], 1))
+        self.rotation_deg = np.arccos((np.trace(image_1_pose_matrix[:, 0:3] @ image_2_pose_matrix[:, 0:3].T) - 1) / 2)
+        self.image_1_pose_matrix = image_1_pose_matrix
+        self.image_2_pose_matrix = image_2_pose_matrix
+
         self._F_mat_forward = StdStereoFundamentalMatrixPair.calc_f_matrix(
-            image_1_intrinsic_matrix, image_1_pose_matrix, image_2_intrinsic_matrix, image_2_extrinsic_matrix
+            image_1_intrinsic_matrix_inv, image_1_pose_matrix, image_2_intrinsic_matrix, image_2_extrinsic_matrix
         )
         self._F_mat_backward = StdStereoFundamentalMatrixPair.calc_f_matrix(
-            image_2_intrinsic_matrix, image_2_pose_matrix, image_1_intrinsic_matrix, image_1_extrinsic_matrix
+            image_2_intrinsic_matrix_inv, image_2_pose_matrix, image_1_intrinsic_matrix, image_1_extrinsic_matrix
         )
 
     @property

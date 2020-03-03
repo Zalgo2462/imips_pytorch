@@ -4,9 +4,9 @@ import torch
 import torch.nn.functional
 
 
-class ImipsNet(torch.nn.Module, metaclass=abc.ABCMeta):
+class ImipNet(torch.nn.Module, metaclass=abc.ABCMeta):
     def __init__(self, input_channels: int, output_channels: int):
-        super(ImipsNet, self).__init__()
+        super(ImipNet, self).__init__()
         self._input_channels = input_channels
         self._output_channels = output_channels
 

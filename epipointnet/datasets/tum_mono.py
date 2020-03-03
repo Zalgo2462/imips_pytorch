@@ -7,8 +7,8 @@ from typing import Optional, List
 import docker
 import torch.utils.data
 
-from epipolar_nn.data import pairs, klt
-from epipolar_nn.datasets import sequence
+from epipointnet.data import pairs, klt
+from epipointnet.datasets import sequence
 
 
 class TUMMonocularStereoPairs(torch.utils.data.Dataset):

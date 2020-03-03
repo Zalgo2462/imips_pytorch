@@ -8,12 +8,12 @@ import numpy as np
 import torch.utils.data
 import torchvision.datasets.utils as tv_data
 
-from epipolar_nn.data import klt
-from epipolar_nn.datasets import sequence
+from epipointnet.data import klt, calibrated, pairs
+from epipointnet.datasets import sequence
 
 
-class TUMRGBDDataset:
-    _FR3_DATASETS: List[str] = [
+class TUMRGBDDataset(torch.utils.data.dataset.Dataset):
+    FR3_DATASETS: List[str] = [
         "fr3/long_office_household",
         "fr3/nostructure_notexture_far",
         "fr3/nostructure_notexture_near_withloop",
@@ -56,7 +56,12 @@ class TUMRGBDDataset:
         "fr3": np.array([
             [537.960322, 0, 319.183641],
             [0, 539.597659, 247.053820],
-            [0, 0, 1],
+            [0, 0, 1]
+        ]),
+        "ros": np.array([
+            [525.0, 0, 319.5],
+            [0, 525.0, 239.5],
+            [0, 0, 1]
         ])
     }
 
@@ -76,6 +81,7 @@ class TUMRGBDDataset:
             self.long_name
         )
         self.intrinsic_matrix = TUMRGBDDataset._INTRINSICS_MAP[name_parts[0]]
+        self.intrinsic_matrix_inv = np.linalg.inv(self.intrinsic_matrix)
         self.radial_distortion = TUMRGBDDataset._INTRINSICS_MAP[name_parts[0]]
 
 
@@ -83,27 +89,27 @@ class TUMRGBDStereoPairs(torch.utils.data.Dataset):
 
     @property
     def raw_folder(self: 'TUMRGBDStereoPairs') -> str:
-        return os.path.join(self.root_folder, self.__class__.__name__, 'raw')
+        return os.path.join(self._root_folder, self.__class__.__name__, 'raw')
 
     @property
     def raw_extracted_folder(self: 'TUMRGBDStereoPairs') -> str:
-        return os.path.join(self.raw_folder, self.dataset.long_name)
+        return os.path.join(self.raw_folder, self._dataset.long_name)
 
     @property
     def processed_folder(self: 'TUMRGBDStereoPairs') -> str:
-        return os.path.join(self.root_folder, self.__class__.__name__, 'processed', self.dataset.long_name)
+        return os.path.join(self._root_folder, self.__class__.__name__, 'processed', self._dataset.long_name)
 
     def __init__(self: 'TUMRGBDStereoPairs', root: str,
                  dataset_name: str,
                  train: Optional[bool] = True,
                  download: Optional[bool] = False,
-                 minimum_KLT_overlap: Optional[float] = 0.3) -> None:
-        self.root_folder = os.path.abspath(root)
-        self.dataset = TUMRGBDDataset(dataset_name)
-        self.train = train
+                 minimum_KLT_overlap: Optional[float] = 0.3,
+                 f_matrix_algorithm: Optional[int] = None) -> None:
+        self._root_folder = os.path.abspath(root)
+        self._dataset = TUMRGBDDataset(dataset_name)
+        self._train = train
 
         self._tracker = klt.Tracker()
-
         if download:
             self.download()
 
@@ -119,10 +125,10 @@ class TUMRGBDStereoPairs(torch.utils.data.Dataset):
 
         # load the images
         img_path = os.path.join(self.processed_folder, "images")
-        self.image_sequence = sequence.GlobImageSequence(os.path.join(img_path, "*.png"))
+        self._image_sequence = sequence.GlobImageSequence(os.path.join(img_path, "*.png"))
 
         # If the image data doesn't match the pose data, quit.
-        assert len(self.image_sequence) == len(image_names)
+        assert len(self._image_sequence) == len(image_names)
 
         # load the klt data
         with open(os.path.join(img_path, "overlap.pickle"), 'rb') as overlap_file:
@@ -131,9 +137,16 @@ class TUMRGBDStereoPairs(torch.utils.data.Dataset):
         self._overlapped_frames_cum_sum = []
         overlapped_frames = seq_overlap.find_frames_with_overlap(0, minimum_KLT_overlap).size
         self._overlapped_frames_cum_sum.append(overlapped_frames)
-        for i in range(1, len(self.image_sequence) - 1):
+        for i in range(1, len(self._image_sequence) - 1):
             overlapped_frames = seq_overlap.find_frames_with_overlap(i, minimum_KLT_overlap).size
             self._overlapped_frames_cum_sum.append(overlapped_frames + self._overlapped_frames_cum_sum[-1])
+
+        if f_matrix_algorithm is None:
+            f_matrix_algorithm = calibrated.PINV_F_MAT_ALGORITHM
+
+        assert f_matrix_algorithm in [calibrated.PINV_F_MAT_ALGORITHM, calibrated.STD_STEREO_F_MAT_ALGORITHM]
+
+        self._f_matrix_algorithm = f_matrix_algorithm
 
     def __len__(self: 'TUMRGBDStereoPairs') -> int:
         return self._overlapped_frames_cum_sum[-1]
@@ -149,25 +162,51 @@ class TUMRGBDStereoPairs(torch.utils.data.Dataset):
         else:
             img_2_index = 1 + index
 
-        # TODO: Create type for deriving F matrix from extrinsics/ intrinsics/ etc.
+        img_sequence = self._image_sequence[img_1_index:img_2_index + 1]  # Add 1 since the end of a slice is exclusive
+        pair_name = "{0}: {1} {2}".format(self._dataset.short_name, img_1_index, img_2_index)
 
-        img_sequence = self.image_sequence[img_1_index:img_2_index + 1]  # Add 1 since the end of a slice is exclusive
-        pair_name = "{0}: {1} {2}".format(self.dataset.short_name, img_1_index, img_2_index)
+        klt_pair = klt.KLTPair(img_sequence, self._tracker, pair_name)
 
-        img_1_extrinsics = self.extrinsics_map[self.image_sequence.file_name(img_1_index)]
-        img_2_extrinsics = self.extrinsics_map[self.image_sequence.file_name(img_2_index)]
-        intrinsics = self.dataset.intrinsic_matrix
+        img_1_file_name = os.path.basename(self._image_sequence.file_name(img_1_index))
+        img_2_file_name = os.path.basename(self._image_sequence.file_name(img_2_index))
 
-        # return KLTPair(img_sequence, self._tracker, pair_name)
+        img_1_pose_mat, img_1_extrinsic_mat = self.extrinsics_map[img_1_file_name]
+        img_2_pose_mat, img_2_extrinsic_mat = self.extrinsics_map[img_2_file_name]
+        intrinsic_mat = self._dataset.intrinsic_matrix
+
+        # Both algorithms yield the same matrix when normalized
+        if self._f_matrix_algorithm == calibrated.PINV_F_MAT_ALGORITHM:
+            img_1_camera_center = img_1_pose_mat[0:3, -1, np.newaxis]
+            img_2_camera_center = img_2_pose_mat[0:3, -1, np.newaxis]
+
+            f_pair = calibrated.PinvFundamentalMatrixPair(
+                klt_pair.image_1, klt_pair.image_2, klt_pair.name,
+                img_1_camera_center, img_2_camera_center,
+                intrinsic_mat @ img_1_extrinsic_mat, intrinsic_mat @ img_2_extrinsic_mat
+            )
+        elif self._f_matrix_algorithm == calibrated.STD_STEREO_F_MAT_ALGORITHM:
+            intrinsic_mat_inv = self._dataset.intrinsic_matrix_inv
+            f_pair = calibrated.StdStereoFundamentalMatrixPair(
+                klt_pair.image_1, klt_pair.image_2, klt_pair.name,
+                intrinsic_mat, intrinsic_mat,
+                intrinsic_mat_inv, intrinsic_mat_inv,
+                img_1_extrinsic_mat, img_2_extrinsic_mat,
+                img_1_pose_mat, img_2_pose_mat
+            )
+        else:
+            # Not reachable unless self._f_matrix_algorithm was tampered with
+            assert False
+
+        return pairs.CorrespondenceFundamentalMatrixPair(klt_pair, f_pair)
 
     def download(self):
         if not self._check_raw_exists():
             os.makedirs(self.raw_folder, exist_ok=True)
             tv_data.download_url(
-                self.dataset.url, root=self.raw_folder,
+                self._dataset.url, root=self.raw_folder,
             )
-            old_name = os.path.join(self.raw_folder, self.dataset.long_name + ".tgz", )
-            new_name = os.path.join(self.raw_folder, self.dataset.long_name + ".tar.gz")
+            old_name = os.path.join(self.raw_folder, self._dataset.long_name + ".tgz", )
+            new_name = os.path.join(self.raw_folder, self._dataset.long_name + ".tar.gz")
             os.rename(old_name, new_name)
             tv_data.extract_archive(new_name, self.raw_folder, remove_finished=True)
         if not self._check_processed_exists():
@@ -179,14 +218,12 @@ class TUMRGBDStereoPairs(torch.utils.data.Dataset):
             img_seq = sequence.GlobImageSequence(os.path.join(new_image_path, "*.png"))
             seq_overlap = self._tracker.find_sequence_overlap(img_seq, max_num_points=500)
             with open(os.path.join(new_image_path, "overlap.pickle"), 'wb') as overlap_file:
+                # TODO: move overlap file to parent directory
                 pickle.dump(seq_overlap, overlap_file)
 
             pose_data = TUMRGBDStereoPairs._read_list_file(os.path.join(self.raw_extracted_folder, "groundtruth.txt"))
             image_timestamps = TUMRGBDStereoPairs._read_list_file(os.path.join(self.raw_extracted_folder, "rgb.txt"))
             images, poses, extrinsics, errors = TUMRGBDStereoPairs._extract_extrinsics(pose_data, image_timestamps)
-
-            # Assert that there are no sampling issues in the middle of the dataset
-            assert all([x[1] != TUMRGBDStereoPairs._ERR_IMG_TS_NO_SAMPLES] for x in errors)
 
             # If there are any images that were captured outside of the MoCap recording,
             # delete them.
@@ -212,12 +249,10 @@ class TUMRGBDStereoPairs(torch.utils.data.Dataset):
              1 - 2 * quaternion[1] ** 2 - 2 * quaternion[2] ** 2]])
 
     _ERR_IMG_TS_OUT_OF_BOUNDS = 0
-    _ERR_IMG_TS_NO_SAMPLES = 1
 
     @staticmethod
     def _extract_extrinsics(pose_data: Dict[float, str],
-                            image_timestamps: Dict[float, str],
-                            max_time_difference: Optional[float] = 0.02) -> Tuple[
+                            image_timestamps: Dict[float, str]) -> Tuple[
         List[str], List[np.ndarray], List[np.ndarray], List[Tuple[str, int]]]:
         pose_timestamps = sorted(pose_data.keys())
         image_names: List[str] = []
@@ -226,7 +261,7 @@ class TUMRGBDStereoPairs(torch.utils.data.Dataset):
         errors: List[Tuple[str, int]] = []
         for image_ts in sorted(image_timestamps.keys()):
             image_name = image_timestamps[image_ts]
-            image_name = image_name.split("/")[-1]
+            image_name = os.path.basename(image_name)
 
             # we need to find two samples around the image's timestamp
             # pose_ts_low is <= image_ts and pose_ts_high_idx > image_ts
@@ -241,15 +276,6 @@ class TUMRGBDStereoPairs(torch.utils.data.Dataset):
             pose_ts_low = pose_timestamps[pose_ts_low_idx]
             pose_ts_high = pose_timestamps[pose_ts_high_idx]
 
-            # Ensure the samples are near the image time stamp
-            if image_ts - pose_ts_low > max_time_difference:
-                errors.append((image_name, TUMRGBDStereoPairs._ERR_IMG_TS_NO_SAMPLES))
-                continue
-
-            if pose_ts_high - image_ts > max_time_difference:
-                errors.append((image_name, TUMRGBDStereoPairs._ERR_IMG_TS_NO_SAMPLES))
-                continue
-
             # Run a linear interpolation between the two poses
             t = (image_ts - pose_ts_low) / (pose_ts_high - pose_ts_low)
             pose_low = np.fromstring(pose_data[pose_ts_low], sep=" ")
@@ -262,15 +288,15 @@ class TUMRGBDStereoPairs(torch.utils.data.Dataset):
             # Convert the pose to an extrinsic matrix
             # Convert the quaternion pose to a rotation matrix
             pose_rotation_matrix = TUMRGBDStereoPairs._qvec2rotmat(pose_interp[3:7])
-            pose_t_vec = np.reshape(pose_interp[0:3], (3, 1))
+            pose_camera_center = np.reshape(pose_interp[0:3], (3, 1))
             pose_matrix = np.block([
-                [pose_rotation_matrix, pose_t_vec]
+                [pose_rotation_matrix, pose_camera_center]
             ])
-            # The matrix [pose_rotation_matrix -- 0T | pose_t_vec -- 1] can be viewed as an affine transform
+            # The matrix [pose_rotation_matrix -- 0T | pose_camera_center -- 1] can be viewed as an affine transform
             # from camera coordinates to world coordinates. We need to invert this affine transform
             # in order to find the extrinsic matrix which transforms world coordinates to camera coordinates.
             extrinsic_matrix = np.block([
-                [pose_rotation_matrix.T, -1 * pose_rotation_matrix.T @ pose_t_vec]
+                [pose_rotation_matrix.T, -1 * pose_rotation_matrix.T @ pose_camera_center]
             ])
             image_names.append(image_name)
             poses.append(pose_matrix)

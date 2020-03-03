@@ -213,7 +213,7 @@ class Tracker:
                 plt.title("Frame %d / %d" % (i, len(image_sequence)))
                 plt.imshow(curr_img, cmap='gray')
                 plt.plot(keypoints[1, :], keypoints[0, :], ls='', marker='x', ms=5, c='r')
-                plt.show()
+                plt.draw()
                 plt.pause(0.001)
                 plt.clf()
 
@@ -225,23 +225,33 @@ class Tracker:
 class KLTPair(CorrespondencePair):
 
     def __init__(self, images: Sequence[np.ndarray], tracker: Tracker, name: str):
-        self.__sequence = list(images)  # Ensure the sequence is loaded into memory
-        self.__name = name
+        self._sequence = list(images)  # Ensure the kitti_sequence is loaded into memory
+        self._name = name
         self._tracker = tracker
 
     def correspondences(self, pixels_xy: np.ndarray, inverse: bool = False) -> Tuple[np.ndarray, np.ndarray]:
-        seq_length = len(self.__sequence)
+        seq_length = len(self._sequence)
         iter_order = range(0, seq_length)
         if inverse:
             iter_order = iter_order[::-1]
 
-        prev_img = self.__sequence[iter_order[0]]
+        prev_img = self._sequence[iter_order[0]]
 
         keypoints_rc = np.flipud(pixels_xy)
         keypoint_indices = np.arange(keypoints_rc.shape[1], dtype=int)
         for i_iter in range(1, seq_length):
+            #     import matplotlib
+            #     matplotlib.use('TkAgg')
+            #     import matplotlib.pyplot as plt
+            #     plt.figure("Keypoint Tracking")
+            #     plt.title("Frame %d / %d" % (0, seq_length))
+            #     plt.imshow(prev_img, cmap='gray')
+            #     plt.plot(keypoints_rc[1, :], keypoints_rc[0, :], ls='', marker='x', ms=5, c='r')
+            #     plt.draw()
+            #     plt.pause(0.001)
+            #     plt.clf()
             i = iter_order[i_iter]
-            curr_img = self.__sequence[i]
+            curr_img = self._sequence[i]
             tracked_status, keypoints_rc = self._tracker.track(
                 prev_img, curr_img, keypoints_rc
             )
@@ -253,15 +263,15 @@ class KLTPair(CorrespondencePair):
 
     @property
     def image_1(self) -> np.ndarray:
-        return self.__sequence[0]
+        return self._sequence[0]
 
     @property
     def image_2(self) -> np.ndarray:
-        return self.__sequence[-1]
+        return self._sequence[-1]
 
     @property
     def name(self) -> str:
-        return self.__name
+        return self._name
 
 
 class KLTPairGenerator:

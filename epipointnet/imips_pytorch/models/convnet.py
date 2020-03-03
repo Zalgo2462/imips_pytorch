@@ -4,10 +4,10 @@ import torch.nn.functional
 from . import imips
 
 
-class SimpleConv(imips.ImipsNet):
+class SimpleConv(imips.ImipNet):
 
     def __init__(self, num_convolutions: int = 14, input_channels: int = 1, output_channels: int = 128):
-        imips.ImipsNet.__init__(self, input_channels, output_channels)
+        imips.ImipNet.__init__(self, input_channels, output_channels)
 
         self._num_convolutions = num_convolutions
         self._receptive_field_diameter = num_convolutions * 2 + 1

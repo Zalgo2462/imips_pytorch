@@ -3,7 +3,7 @@ import os.path
 import numpy as np
 import torch
 
-import epipolar_nn.imips_pytorch.train
+import epipointnet.imips_pytorch.train
 
 """
 run_imips_pytorch_loss.py runs train.py:ImipsTrainer.__loss (the re-implementation of the IMIPS loss routine) against
@@ -12,7 +12,7 @@ run_imips_pytorch_loss.py runs train.py:ImipsTrainer.__loss (the re-implementati
 will create it. The imips loss and the sub-losses for each case are then saved to
 ./test_cases/test_case_####/losses-pytorch.npy.  
 
-This script is meant to be run along side a similar script which runs 
+This script is meant to be run along side the similar script run_imis_tf_loss.py.
 """
 
 for i in range(1000):
@@ -41,7 +41,7 @@ for i in range(1000):
     eps = torch.tensor(1e-4).cuda()
 
     loss, outlier_correspondence_loss, inlier_loss, \
-    outlier_maximizer_loss, unaligned_maximizer_loss = epipolar_nn.imips_pytorch.train.ImipsTrainer._loss(
+    outlier_maximizer_loss, unaligned_maximizer_loss = epipointnet.imips_pytorch.train.ImipsTrainer._loss(
         maximizer_outputs, correspondence_outputs, inlier_labels, outlier_labels, eps
     )
 

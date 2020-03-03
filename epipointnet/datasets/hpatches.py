@@ -7,8 +7,8 @@ import numpy as np
 import torch.utils.data
 import torchvision.datasets.utils as tv_data
 
-from epipolar_nn.data import planar
-from epipolar_nn.datasets import sequence
+from epipointnet.data import planar
+from epipointnet.datasets import sequence
 
 
 class HPatchesPair(planar.HomographyPair):
@@ -81,7 +81,7 @@ class HPatchesPairGenerator:
 
 
 class HPatchesSequencesStereoPairs(torch.utils.data.Dataset):
-    """Loads the HPatches sequences train_dataset and returns stereo pairs of images from each sequence"""
+    """Loads the HPatches sequences train_dataset and returns stereo pairs of images from each kitti_sequence"""
 
     url: str = 'http://icvl.ee.ic.ac.uk/vbalnt/hpatches/hpatches-sequences-release.tar.gz'
     pairs_per_sequence: int = 15  # 6 choose 2 pairs
