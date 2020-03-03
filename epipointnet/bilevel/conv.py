@@ -39,13 +39,16 @@ class Sobel2DArgMax(torch.autograd.Function):
             #     [-2, 0, 2],
             #     [-1, 0, 1]
             # ], dtype=bchw.dtype, device=bchw.device)
+
+            # http://www.hlevkin.com/articles/SobelScharrGradients5x5.pdf
             x_spatial_derivative_filter = torch.tensor([
-                [-2, -1, 0, 1, 2],
-                [-2, -1, 0, 1, 2],
-                [-4, -2, 0, 2, 4],
-                [-2, -1, 0, 1, 2],
-                [-2, -1, 0, 1, 2]
+                [-5, -4, 0, 4, 5],
+                [-8, -10, 0, 10, 8],
+                [-10, -20, 0, 20, 10],
+                [-8, -10, 0, 10, 8],
+                [-5, -4, 0, 4, 5]
             ], dtype=bchw.dtype, device=bchw.device)
+
             ctx.BC2DAM_x_spatial_derivative_filter = x_spatial_derivative_filter
 
         return backward_conv_2d_arg_optim(d_err_d_coords, bchw, max_coords, x_spatial_derivative_filter)
