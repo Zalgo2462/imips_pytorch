@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 import torch
 
-from .train import ImipsTrainer
+from .trainer import ImipTrainer
 
 
 class TestImipsTrainer(unittest.TestCase):
@@ -16,9 +16,9 @@ class TestImipsTrainer(unittest.TestCase):
         unpacked_correspondences[:, correspondence_mask] = anchors[:, correspondence_mask]
         packed_correspondences = anchors[:, correspondence_indices]
 
-        test_unpacked_correspondences, test_correspondence_mask = ImipsTrainer._unpack_correspondences(anchors,
-                                                                                                       packed_correspondences,
-                                                                                                       correspondence_indices)
+        test_unpacked_correspondences, test_correspondence_mask = ImipTrainer._unpack_correspondences(anchors,
+                                                                                                      packed_correspondences,
+                                                                                                      correspondence_indices)
         test_unpacked_correspondences = test_unpacked_correspondences.cpu().numpy()
         test_correspondence_mask = test_correspondence_mask.cpu().numpy()
 
@@ -51,7 +51,7 @@ class TestImipsTrainer(unittest.TestCase):
         img_1_inliers = img_1_inliers & img_2_corr_mask
         img_2_inliers = img_2_inliers & img_1_corr_mask
 
-        test_img_1_inliers, test_img_1_outliers, test_img_2_inliers, test_img_2_outliers = ImipsTrainer._label_inliers_outliers(
+        test_img_1_inliers, test_img_1_outliers, test_img_2_inliers, test_img_2_outliers = ImipTrainer.label_inliers_outliers(
             torch.tensor(img_1_keypoints_xy, device="cuda", dtype=torch.float32),
             torch.tensor(img_1_correspondences_xy, device="cuda", dtype=torch.float32),
             torch.tensor(img_1_corr_mask, device="cuda"),
@@ -78,8 +78,8 @@ class TestImipsTrainer(unittest.TestCase):
             kp_y = keypoints_xy[1, i]
             patch_batch[i, 0, :, :] = image[kp_y - radius: kp_y + radius + 1, kp_x - radius: kp_x + radius + 1, 0]
 
-        test_patch_batch = ImipsTrainer._image_to_patch_batch(image, torch.tensor(keypoints_xy, device="cuda"),
-                                                              diameter)
+        test_patch_batch = ImipTrainer.image_to_patch_batch(image, torch.tensor(keypoints_xy, device="cuda"),
+                                                            diameter)
         test_patch_batch = test_patch_batch.cpu().numpy()
 
         self.assertTrue(np.array_equal(test_patch_batch, patch_batch))

@@ -3,10 +3,10 @@ import os.path
 import numpy as np
 import torch
 
-import epipointnet.imips_pytorch.train
+import epipointnet.imips_pytorch.trainer
 
 """
-run_imips_pytorch_loss.py runs train.py:ImipsTrainer.__loss (the re-implementation of the IMIPS loss routine) against
+run_imips_pytorch_loss.py runs trainer.py:ImipsTrainer.__loss (the re-implementation of the IMIPS loss routine) against
 1000 test cases of synthetic IMIPS network output on 256 image patches each. It reads the test case numpy files
 (scores.npy and labels.npy) from ./test_cases/test_case_####. If the test case data does not exist, the script
 will create it. The imips loss and the sub-losses for each case are then saved to
@@ -41,7 +41,7 @@ for i in range(1000):
     eps = torch.tensor(1e-4).cuda()
 
     loss, outlier_correspondence_loss, inlier_loss, \
-    outlier_maximizer_loss, unaligned_maximizer_loss = epipointnet.imips_pytorch.train.ImipsTrainer._loss(
+    outlier_maximizer_loss, unaligned_maximizer_loss = epipointnet.imips_pytorch.trainer.ImipTrainer.loss(
         maximizer_outputs, correspondence_outputs, inlier_labels, outlier_labels, eps
     )
 

@@ -1,8 +1,12 @@
 import torch
 import torch.autograd
 
+_f32_eps = float.fromhex('1p-23')
+
 
 class Sobel2DArgMax(torch.autograd.Function):
+    neighborhood_size = 5
+    half_neighborhood_size = 2
 
     @staticmethod
     def forward(ctx, *args, **kwargs):
@@ -19,14 +23,21 @@ class Sobel2DArgMax(torch.autograd.Function):
 
         coords = torch.stack((bc_x, bc_y), dim=1)  # shape: bx2xc
 
-        ctx.save_for_backward(bchw, coords)
+        no_grad_due_to_border = (
+                (bc_x < Sobel2DArgMax.half_neighborhood_size) |
+                (bc_y < Sobel2DArgMax.half_neighborhood_size) |
+                ((bchw.shape[3] - Sobel2DArgMax.half_neighborhood_size) <= bc_x) |
+                ((bchw.shape[2] - Sobel2DArgMax.half_neighborhood_size) <= bc_y)
+        )  # shape bxc
+
+        ctx.save_for_backward(bchw, coords.clone(), no_grad_due_to_border)
 
         return coords
 
     @staticmethod
     def backward(ctx, *grad_outputs):
         d_err_d_coords = grad_outputs[0]  # shape: bx2xc
-        bchw, max_coords = ctx.saved_tensors  # shapes: bxcxhxw, bx2xc
+        bchw, max_coords, no_grad_due_to_border = ctx.saved_tensors  # shapes: bxcxhxw, bx2xc
         max_coords = max_coords.to(torch.long)
 
         try:
@@ -34,27 +45,28 @@ class Sobel2DArgMax(torch.autograd.Function):
             if x_spatial_derivative_filter.device != bchw.device:
                 x_spatial_derivative_filter = x_spatial_derivative_filter.to(device=bchw.device)
         except AttributeError:
-            # x_spatial_derivative_filter = torch.tensor([
-            #     [-1, 0, 1],
-            #     [-2, 0, 2],
-            #     [-1, 0, 1]
-            # ], dtype=bchw.dtype, device=bchw.device)
+            x_spatial_derivative_filter = torch.tensor([
+                [-1, 0, 1],
+                [-2, 0, 2],
+                [-1, 0, 1]
+            ], dtype=bchw.dtype, device=bchw.device)
 
             # http://www.hlevkin.com/articles/SobelScharrGradients5x5.pdf
-            x_spatial_derivative_filter = torch.tensor([
-                [-5, -4, 0, 4, 5],
-                [-8, -10, 0, 10, 8],
-                [-10, -20, 0, 20, 10],
-                [-8, -10, 0, 10, 8],
-                [-5, -4, 0, 4, 5]
-            ], dtype=bchw.dtype, device=bchw.device)
+            # x_spatial_derivative_filter = torch.tensor([
+            #     [-5, -4, 0, 4, 5],
+            #     [-8, -10, 0, 10, 8],
+            #     [-10, -20, 0, 20, 10],
+            #     [-8, -10, 0, 10, 8],
+            #     [-5, -4, 0, 4, 5]
+            # ], dtype=bchw.dtype, device=bchw.device)
 
             ctx.BC2DAM_x_spatial_derivative_filter = x_spatial_derivative_filter
 
-        return backward_conv_2d_arg_optim(d_err_d_coords, bchw, max_coords, x_spatial_derivative_filter)
+        return backward_conv_2d_arg_optim(d_err_d_coords, bchw, max_coords, no_grad_due_to_border,
+                                          x_spatial_derivative_filter)
 
 
-def backward_conv_2d_arg_optim(d_err_d_coords, bchw, max_coords, x_spatial_derivative_filter):
+def backward_conv_2d_arg_optim(d_err_d_coords, bchw, max_coords, no_grad_due_to_border, x_spatial_derivative_filter):
     # Each column of the 2xc output represents the error gradient
     # w.r.t. the coordinates of the maximums in each of the corresponding channel maps.
     # Consider a single column and call it d_err_d_coords err(...).
@@ -97,14 +109,15 @@ def backward_conv_2d_arg_optim(d_err_d_coords, bchw, max_coords, x_spatial_deriv
     )
     for b in range(bchw.shape[0]):
         for c in range(bchw.shape[1]):
-            argmax_patches[b, c, :, :] = bchw[
-                                         b,
-                                         c,
-                                         max_coords_y[b, c] - spatial_2nd_order_derivative_radii[1]:
-                                         max_coords_y[b, c] + spatial_2nd_order_derivative_radii[1] + 1,
-                                         max_coords_x[b, c] - spatial_2nd_order_derivative_radii[0]:
-                                         max_coords_x[b, c] + spatial_2nd_order_derivative_radii[0] + 1
-                                         ]  # shape: bxcx(2*2nd order radii + 1)x(2*2nd order radii + 1)
+            if not no_grad_due_to_border[b, c]:
+                argmax_patches[b, c, :, :] = bchw[
+                                             b,
+                                             c,
+                                             max_coords_y[b, c] - spatial_2nd_order_derivative_radii[1]:
+                                             max_coords_y[b, c] + spatial_2nd_order_derivative_radii[1] + 1,
+                                             max_coords_x[b, c] - spatial_2nd_order_derivative_radii[0]:
+                                             max_coords_x[b, c] + spatial_2nd_order_derivative_radii[0] + 1
+                                             ]  # shape: bxcx(2*2nd order radii + 1)x(2*2nd order radii + 1)
 
     x_spatial_derivative_weights = x_spatial_derivative_filter.expand((num_channels, 1, -1, -1))
     patches_du = torch.nn.functional.conv2d(argmax_patches, x_spatial_derivative_weights, groups=num_channels)
@@ -126,6 +139,9 @@ def backward_conv_2d_arg_optim(d_err_d_coords, bchw, max_coords, x_spatial_deriv
         torch.stack((patches_dudv, patches_dvdv), dim=-1)
     ), dim=-1)  # shape: bxcx2x2
 
+    # Prevent the inverse from blowing up
+    bchw_grad_2_yy[bchw_grad_2_yy.abs() < _f32_eps] = 0
+
     d_bchw_grad_y_dx = torch.zeros(
         (bchw.shape[0], bchw.shape[1], bchw.shape[2], bchw.shape[3], 2),
         dtype=bchw.dtype,
@@ -137,23 +153,25 @@ def backward_conv_2d_arg_optim(d_err_d_coords, bchw, max_coords, x_spatial_deriv
 
     for b in range(bchw.shape[0]):
         for c in range(bchw.shape[1]):
-            d_bchw_grad_y_dx[
-            b, c,
-            max_coords_y[b, c] - spatial_derivative_radii[1]:
-            max_coords_y[b, c] + spatial_derivative_radii[1] + 1,
-            max_coords_x[b, c] - spatial_derivative_radii[0]:
-            max_coords_x[b, c] + spatial_derivative_radii[0] + 1,
-            :
-            ] = torch.stack((
-                x_spatial_derivative_filter,
-                x_spatial_derivative_filter.t()),
-                dim=-1
-            )
+            if not no_grad_due_to_border[b, c]:
+                d_bchw_grad_y_dx[
+                b, c,
+                max_coords_y[b, c] - spatial_derivative_radii[1]:
+                max_coords_y[b, c] + spatial_derivative_radii[1] + 1,
+                max_coords_x[b, c] - spatial_derivative_radii[0]:
+                max_coords_x[b, c] + spatial_derivative_radii[0] + 1,
+                :
+                ] = torch.stack((
+                    x_spatial_derivative_filter,
+                    x_spatial_derivative_filter.t()),
+                    dim=-1
+                )
 
     # bchw_grad_2_yy_at_y.inverse(): bxcx2x2 -> bxcx1x1x2x2
     # d_bchw_grad_y_dx: bxcxhxwx2 -> bxcxhxwx2x1
+    # This matmul seems to take longer than the convolutions. TODO: look into sparse representation
     coords_grad_x = -1 * torch.matmul(
-        bchw_grad_2_yy.inverse().unsqueeze(2).unsqueeze(2),
+        bchw_grad_2_yy.pinverse().unsqueeze(2).unsqueeze(2),
         d_bchw_grad_y_dx.unsqueeze(-1)
     )  # shape: bxcxhxwx2x1
 

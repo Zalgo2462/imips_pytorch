@@ -1,6 +1,7 @@
 import bisect
 import os
 import pickle
+import shutil
 from typing import Optional, Dict, Tuple
 
 import numpy as np
@@ -172,16 +173,15 @@ class KITTIMonocularStereoPairsSequence(torch.utils.data.Dataset):
         if not self._check_processed_exists():
             os.makedirs(self._processed_sequence_folder, exist_ok=True)
 
-            #
-            # camera_dir = "image_2" if self._color else "image_0"
-            # old_image_path = os.path.join(self._raw_folder, "dataset", "sequences", self._sequence, camera_dir)
-            # new_image_path = os.path.join(self._processed_sequence_folder, "images")
-            # shutil.copytree(old_image_path, new_image_path)
-            #
-            # img_seq = sequence.GlobImageSequence(os.path.join(new_image_path, "*.png"))
-            # seq_overlap = self._tracker.find_sequence_overlap(img_seq, max_num_points=500)
-            # with open(os.path.join(self._processed_sequence_folder, "overlap.pickle"), 'wb') as overlap_file:
-            #     pickle.dump(seq_overlap, overlap_file)
+            camera_dir = "image_2" if self._color else "image_0"
+            old_image_path = os.path.join(self._raw_folder, "dataset", "sequences", self._sequence, camera_dir)
+            new_image_path = os.path.join(self._processed_sequence_folder, "images")
+            shutil.copytree(old_image_path, new_image_path)
+
+            img_seq = sequence.GlobImageSequence(os.path.join(new_image_path, "*.png"))
+            seq_overlap = self._tracker.find_sequence_overlap(img_seq, max_num_points=500)
+            with open(os.path.join(self._processed_sequence_folder, "overlap.pickle"), 'wb') as overlap_file:
+                pickle.dump(seq_overlap, overlap_file)
 
             # intrinsic_mats are the post rectification intrinsic matrices for each camera
             # relative extrinsic_mats is a stack of N 4x4 matrices which map points in the

@@ -15,35 +15,27 @@ class SimpleConv(imips.ImipNet):
         num_channels_first_half = output_channels // 2
 
         layers_list = []
-        layers_list.append(
-            torch.nn.Conv2d(input_channels, num_channels_first_half, kernel_size=3)
-        )
-        layers_list.append(
+        layers_list.extend([
+            torch.nn.Conv2d(input_channels, num_channels_first_half, kernel_size=3),
             torch.nn.LeakyReLU(negative_slope=0.02)  # default for tensorflow/ imips
-        )
+        ])
 
         for i in range((num_convolutions // 2) - 1):
-            layers_list.append(
-                torch.nn.Conv2d(num_channels_first_half, num_channels_first_half, kernel_size=3)
-            )
-            layers_list.append(
+            layers_list.extend([
+                torch.nn.Conv2d(num_channels_first_half, num_channels_first_half, kernel_size=3),
                 torch.nn.LeakyReLU(negative_slope=0.02)
-            )
+            ])
 
-        layers_list.append(
+        layers_list.extend([
             torch.nn.Conv2d(num_channels_first_half, output_channels, kernel_size=3),
-        )
-        layers_list.append(
             torch.nn.LeakyReLU(negative_slope=0.02)
-        )
+        ])
 
         for i in range((num_convolutions // 2) - 1):
-            layers_list.append(
+            layers_list.extend([
                 torch.nn.Conv2d(output_channels, output_channels, kernel_size=3),
-            )
-            layers_list.append(
                 torch.nn.LeakyReLU(negative_slope=0.02)
-            )
+            ])
 
         self.conv_layers = torch.nn.Sequential(*layers_list)
 
@@ -58,13 +50,13 @@ class SimpleConv(imips.ImipNet):
 
     def forward(self, images: torch.Tensor, keepDim: bool = False) -> torch.Tensor:
         # imips centers the data between [-127, 128]
-        constant_bias = torch.tensor([127], device="cuda")
+        constant_bias = torch.tensor([127], device=images.device)
 
         images = images - constant_bias
         images = self.conv_layers(images)
 
         # imips subtracts off 1.5 without explanation
-        sigmoid_bias = torch.tensor([1.5], device="cuda")
+        sigmoid_bias = torch.tensor([1.5], device=images.device)
         images = images - sigmoid_bias
 
         images: torch.Tensor = self.sigmoid_layer(images)

@@ -1,4 +1,5 @@
 import abc
+from typing import Optional
 
 import torch
 import torch.nn.functional
@@ -20,7 +21,12 @@ class ImipNet(torch.nn.Module, metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @torch.no_grad()
-    def extract_keypoints(self, image: torch.Tensor) -> (torch.Tensor, torch.Tensor):
+    def extract_keypoints(self, image: torch.Tensor, exclude_border_px: Optional[int] = None) -> (
+    torch.Tensor, torch.Tensor):
+        # Only return keypoints for which there is valid responses
+        if exclude_border_px is None or exclude_border_px < (self.receptive_field_diameter() - 1) // 2:
+            exclude_border_px = (self.receptive_field_diameter() - 1) // 2
+
         # assume image is CxHxW
         assert len(image.shape) == 3 and image.shape[0] == self._input_channels
 
@@ -29,9 +35,16 @@ class ImipNet(torch.nn.Module, metaclass=abc.ABCMeta):
 
         # output: 1xCxHxW -> CxHxW
         output: torch.Tensor = self.__call__(image, True).squeeze(dim=0)
-        output_shape = output.shape
+
+        # don't return any keypoint that is in the receptive field radius
+        # from the border
+        output[:, :exclude_border_px, :] = 0
+        output[:, :, :exclude_border_px] = 0
+        output[:, -exclude_border_px:, :] = 0
+        output[:, :, -exclude_border_px:] = 0
 
         # CxHxW -> CxI where I = H*W
+        output_shape = output.shape
         output_linear = output.reshape((output_shape[0], -1))
 
         # C length

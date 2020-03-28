@@ -30,13 +30,14 @@ def main():
 
     coord_tensor = torch.stack((y_grid, x_grid), dim=-1)  # r, c coord tensor
 
-    target = torch.randint(90, (2,), dtype=torch.long) + 5
+    target = torch.randint(100 - 2 * Sobel2DArgMax.half_neighborhood_size, (2,),
+                           dtype=torch.long) + Sobel2DArgMax.half_neighborhood_size
     with torch.autograd.detect_anomaly():
         drawLayer = DrawLayer(size_tensor)
 
-        drawLayer = drawLayer.cuda()
-        coord_tensor = coord_tensor.cuda()
-        target = target.cuda()
+        # drawLayer = drawLayer.cuda()
+        # coord_tensor = coord_tensor.cuda()
+        # target = target.cuda()
 
         optimizer = SGD(drawLayer.parameters(True), lr=1)
 
@@ -62,7 +63,8 @@ def main():
             loss.backward()
 
             if loss < 1e-4:
-                target = torch.randint(90, (2,), dtype=torch.float32, device=target.device) + 5
+                target = torch.randint(100 - 2 * Sobel2DArgMax.half_neighborhood_size, (2,),
+                                       dtype=torch.long) + Sobel2DArgMax.half_neighborhood_size
             else:
                 optimizer.step()
 
