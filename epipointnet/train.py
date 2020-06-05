@@ -29,8 +29,8 @@ def train_net():
 
     os.makedirs(checkpoints_dir, exist_ok=True)
 
-    kitti_dataset_train = epipointnet.datasets.kitti.KITTIMonocularStereoPairsSequence("./data", "00")
-    kitti_dataset_test = epipointnet.datasets.kitti.KITTIMonocularStereoPairsSequence("./data", "01")
+    kitti_dataset_train = epipointnet.datasets.kitti.KITTIMonocularStereoPairsSequence(data_root, "00")
+    kitti_dataset_test = epipointnet.datasets.kitti.KITTIMonocularStereoPairsSequence(data_root, "05")
 
     def adam_optimizer_factory(parameters: Union[Iterable[torch.Tensor], dict]) -> TorchOptimizer:
         return torch.optim.Adam(parameters, learning_rate)

@@ -1,23 +1,23 @@
 import os
 import random
 import time
-from typing import Callable, Union, Iterable, Tuple, Iterator, Dict
+from typing import Callable, Union, Iterable, Iterator, Dict, Optional
 
 import numpy as np
 import torch
 import torch.utils.data
 import torch.utils.tensorboard
 from torch.optim.optimizer import Optimizer as TorchOptimizer
+from torch.utils.tensorboard import SummaryWriter
 
 from epipointnet.data.pairs import CorrespondenceFundamentalMatrixPair
 from epipointnet.datasets.image import load_image_for_torch
 from epipointnet.datasets.shuffle import ShuffledDataset
 from epipointnet.dfe.loss import robust_symmetric_epipolar_distance, symmetric_epipolar_distance
+from epipointnet.imips_pytorch.losses.imips import ImipLoss
 from epipointnet.imips_pytorch.trainer import ImipTrainer
 from epipointnet.model import PatchBatchEpiPointNet
 
-ImipLossType = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], Tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]
 EpiLossType = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
 
 
@@ -25,33 +25,60 @@ class EpiPointNetTrainer:
 
     def __init__(self,
                  epi_point_net: PatchBatchEpiPointNet,
+                 imip_loss: ImipLoss,
                  optimizer_factory: Callable[[Union[Iterable[torch.Tensor], dict]], TorchOptimizer],
                  train_dataset: torch.utils.data.Dataset,
                  eval_dataset: torch.utils.data.Dataset,
                  num_eval_samples: int,
                  save_directory: str,
+                 device: Optional[Union[str, torch.device]] = None,
                  inlier_radius: int = 3,
                  seed: int = 0,
-                 device: str = "cuda",
                  ):
         self._seed = seed
         np.random.seed(self._seed)
         torch.random.manual_seed(self._seed)
         random.seed(self._seed)
 
-        self._epi_point_net = epi_point_net
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._device = device
+
+        self._epi_point_net = epi_point_net.to(device=self._device)
+        self._imip_loss_module = imip_loss.to(device=self._device)
+        self._imip_loss_func = imip_loss.forward_with_log_data
         self._optimizer = optimizer_factory(self._epi_point_net.parameters())
         self._train_dataset = train_dataset
         self._train_dataset_iter = self._create_new_train_dataset_iterator()
         self._train_eval_dataset = ShuffledDataset(train_dataset, num_eval_samples)
         self._eval_dataset = ShuffledDataset(eval_dataset, num_eval_samples)
         self._inlier_radius = inlier_radius
-        self._device = device
-        self._imip_eps = torch.tensor(1e-4, device=self._device)
         self._best_eval_score = torch.tensor([0], device=self._device)
-        self._t_board_writer = torch.utils.tensorboard.SummaryWriter()
-        self._best_checkpoint_path = os.path.join(save_directory, "imips_best.chkpt")
-        self._latest_checkpoint_path = os.path.join(save_directory, "imips_latest.chkpt")
+        self._best_checkpoint_path = os.path.join(save_directory, "epipointnet_best.chkpt")
+        self._latest_checkpoint_path = os.path.join(save_directory, "epipointnet_latest.chkpt")
+
+    # ################ CHECKPOINTING ################
+
+    def _load_checkpoint(self, checkpoint: dict) -> int:
+        self._seed = checkpoint["seed"]
+        np.random.seed(self._seed)
+        torch.random.manual_seed(self._seed)
+        random.seed(self._seed)
+
+        self._optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self._epi_point_net.load_state_dict(checkpoint["network_state_dict"])
+        self._inlier_radius = checkpoint["inlier_radius"]
+        self._create_new_train_dataset_iterator()
+        return checkpoint["iteration"]
+        # Resetting the data iterator takes too long
+        # for i in range(0, checkpoint["iteration"]):
+        #     self._next_pair()
+
+    def load_best_checkpoint(self) -> int:
+        return self._load_checkpoint(torch.load(self._best_checkpoint_path, map_location=self._device))
+
+    def load_latest_checkpoint(self) -> int:
+        return self._load_checkpoint(torch.load(self._latest_checkpoint_path, map_location=self._device))
 
     # ################ DATASET ITERATION ################
 
@@ -74,6 +101,8 @@ class EpiPointNetTrainer:
         except StopIteration:
             self._train_dataset_iter = self._create_new_train_dataset_iterator()
             return next(self._train_dataset_iter)
+
+    # ################ TRAINING ################
 
     def _train_patches(self, img_1_anchor_patches: torch.Tensor, img_2_anchor_patches: torch.Tensor,
                        img_1_keypoints_xy: torch.Tensor, img_2_keypoints_xy: torch.Tensor,
@@ -116,20 +145,19 @@ class EpiPointNetTrainer:
         # Feed the correspondence patches through the IMIP network in order to compute the IMIP loss
         corr_img_1_imip_outs = self._epi_point_net.imip_net(img_1_corr_patches, keepDim=False)
 
-        (imip_loss, outlier_correspondence_loss, inlier_loss,
-         outlier_maximizer_loss, unaligned_maximizer_loss) = ImipTrainer.loss(
+        imip_loss, imip_loss_logs = self._imip_loss_module(
             img_1_imip_outs, corr_img_1_imip_outs,
-            img_1_inlier_labels, img_1_outlier_labels, self._imip_eps
+            img_1_inlier_labels, img_1_outlier_labels
         )
+        imip_loss_logs = {"imip_" + k: v for k, v in imip_loss_logs.items()}
 
         # TODO: experiment with setting epi loss to zero if < 8 inliers
         # Find the distance between the points which fit the ground truth fundamental matrix
         # and the epipolar lines generated by the fundamental matrices produced by the DFE network
         # Note that we cap the point-wise losses in order to promote training stability.
-        epi_loss = 0
+        epi_loss = torch.tensor([0.], device=self._device)
         for f_mat in f_mats:
-            epi_loss += robust_symmetric_epipolar_distance(image_1_epi_points, image_2_epi_points, f_mat)
-        epi_loss = epi_loss.mean()
+            epi_loss += robust_symmetric_epipolar_distance(image_1_epi_points, image_2_epi_points, f_mat).mean()
 
         # TODO: incorporate epi loss once we can successfully minimize imip_loss
         loss = imip_loss  # + epi_loss
@@ -141,23 +169,23 @@ class EpiPointNetTrainer:
         f_estimated = f_mats[-1]
         f_estimated = f_estimated / f_estimated[:, -1, -1]
         f_estimated_loss = symmetric_epipolar_distance(image_1_epi_points, image_2_epi_points, f_estimated).mean()
-        return {
+
+        loss_logs = {
             "loss": loss.detach(),
             "epi_loss": epi_loss.detach(),
             "f_estimated_loss": f_estimated_loss.detach(),
-            "imip_loss": imip_loss.detach(),
-            "outlier_correspondence_loss": outlier_correspondence_loss.detach(),
-            "inlier_maximizer_loss": inlier_loss.detach(),
-            "outlier_maximizer_loss": outlier_maximizer_loss.detach(),
-            "unaligned_maximizer_loss": unaligned_maximizer_loss.detach(),
         }
+        loss_logs.update(imip_loss_logs)
 
-    def _train_pair(self, pair: CorrespondenceFundamentalMatrixPair, iteration: int) -> [torch.Tensor]:
+        return loss_logs
+
+    def _train_pair(self, pair: CorrespondenceFundamentalMatrixPair,
+                    t_board_writer: SummaryWriter, iteration: int) -> [torch.Tensor]:
         """
         Trains the PatchBatchEpiPointNet on a stereo pair with both correspondence and fundamental matrix information
         :param pair: A stereo pair with both correspondence and fundamental matrix information
         :param iteration: how many pairs have been processed so far after processing this pair
-        :return: the losses generated by processing the pair with image 2 as the origin image
+        :return: the loss_logs generated by processing the pair with image 2 as the origin image
         """
         # Convert numpy HW or HWC to torch CHW
         img_1 = load_image_for_torch(pair.image_1, self._device)
@@ -168,6 +196,13 @@ class EpiPointNetTrainer:
         img_1_keypoints_xy, img_1_responses = self._epi_point_net.imip_net.extract_keypoints(img_1, exclude_border_px)
         img_2_keypoints_xy, img_2_responses = self._epi_point_net.imip_net.extract_keypoints(img_2, exclude_border_px)
 
+        """
+        img_1_responses = img_1_responses.unsqueeze(1)  # Convert CHW to N1HW
+        img_2_responses = img_2_responses.unsqueeze(1)
+        t_board_writer.add_images("training/Image 1 Responses", img_1_responses, iteration)
+        t_board_writer.add_images("training/Image 2 Responses", img_2_responses, iteration)
+        """
+
         # Find the true correspondences for each anchor keypoint
         # img_1_correspondences_xy are the correspondences in img_2 of the anchor keypoints
         #   in img_1 (img_1_keypoints_xy)
@@ -177,6 +212,20 @@ class EpiPointNetTrainer:
          img_2_correspondences_xy, img_2_correspondences_mask) = ImipTrainer.find_correspondences(
             pair, img_1_keypoints_xy, img_2_keypoints_xy, exclude_border_px
         )
+
+        """
+        # Log out the anchors and true correspondences
+        img_1_true_corr_img = ImipTrainer.create_correspondence_image(pair, img_1_keypoints_xy,
+                                                                      img_1_correspondences_xy,
+                                                                      img_1_correspondences_mask)
+        img_2_true_corr_img = ImipTrainer.create_correspondence_image(pair, img_2_correspondences_xy,
+                                                                      img_2_keypoints_xy,
+                                                                      img_2_correspondences_mask)
+        t_board_writer.add_image("training/Predicted Anchors in Image 1 and True Correspondences in Image 2",
+                                       img_1_true_corr_img, iteration)
+        t_board_writer.add_image("training/Predicted Anchors in Image 2 and True Correspondences in Image 1",
+                                       img_2_true_corr_img, iteration)
+        """
 
         # Create the inlier/ outlier labels
         # img_1_inlier_labels is true at an index when there is a valid, true correspondence in img_1 for the
@@ -192,8 +241,8 @@ class EpiPointNetTrainer:
 
         apparent_inliers = (img_1_inlier_labels & img_2_inlier_labels).sum()
         apparent_outliers = (img_1_outlier_labels | img_2_outlier_labels).sum()
-        self._t_board_writer.add_scalar("training/apparent inliers", apparent_inliers, iteration)
-        self._t_board_writer.add_scalar("training/apparent outliers", apparent_outliers, iteration)
+        t_board_writer.add_scalar("training/apparent inliers", apparent_inliers, iteration)
+        t_board_writer.add_scalar("training/apparent outliers", apparent_outliers, iteration)
 
         # Grab the neighborhoods about the keypoints and their true correspondences
         # Note the meaning of the img_1 and img_2 prefixes changes here.
@@ -206,6 +255,17 @@ class EpiPointNetTrainer:
             img_2_keypoints_xy, img_2_correspondences_xy, img_2_correspondences_mask,
             self._epi_point_net.patch_size(),
         )
+
+        """
+        t_board_writer.add_images("training/Image 1 Anchor Patches", img_1_anchor_patches / 255,
+                                        iteration)
+        t_board_writer.add_images("training/Image 1 Correspondence Patches", img_1_corr_patches / 255,
+                                        iteration)
+        t_board_writer.add_images("training/Image 2 Anchor Patches", img_2_anchor_patches / 255,
+                                        iteration)
+        t_board_writer.add_images("training/Image 2 Correspondence Patches", img_2_corr_patches / 255,
+                                        iteration)
+        """
 
         # Generate points which fit the ground truth fundamental matrix
         pts_1_virt, pts_2_virt = pair.generate_virtual_points()
@@ -223,37 +283,31 @@ class EpiPointNetTrainer:
         )
 
         # Train with image 2 as the origin image
-        losses = self._train_patches(
+        loss_logs = self._train_patches(
             img_2_anchor_patches, img_1_anchor_patches,
             img_2_keypoints_xy, img_1_keypoints_xy,
             img_2_inlier_labels, img_2_outlier_labels, img_2_corr_patches,
             pts_2_virt, pts_1_virt
         )
 
-        self._t_board_writer.add_scalar("training/loss", losses["loss"], iteration)
+        for key in loss_logs:
+            t_board_writer.add_scalar("training/" + key, loss_logs[key], iteration)
 
-        self._t_board_writer.add_scalar("training/epi_loss", losses["epi_loss"], iteration)
-        self._t_board_writer.add_scalar("training/f_est_loss", losses["f_estimated_loss"], iteration)
-
-        self._t_board_writer.add_scalar("training/imip_loss", losses["imip_loss"], iteration)
-        self._t_board_writer.add_scalar("training/Outlier Correspondence Loss", losses["outlier_correspondence_loss"],
-                                        iteration)
-        self._t_board_writer.add_scalar("training/Outlier Maximizer Loss", losses["outlier_maximizer_loss"], iteration)
-        self._t_board_writer.add_scalar("training/Inlier Maximizer Loss", losses["inlier_maximizer_loss"], iteration)
-        self._t_board_writer.add_scalar("training/Unaligned Maximizer Loss", losses["unaligned_maximizer_loss"],
-                                        iteration)
-
-        return losses["loss"]
+        return loss_logs["loss"]
 
     def train(self, iterations: int, eval_frequency: int):
         if iterations % eval_frequency != 0:
             raise ValueError(
                 "eval_frequency ({}) must evenly divide iterations ({})".format(eval_frequency, iterations))
 
+        t_board_writer = torch.utils.tensorboard.SummaryWriter()
+        self._epi_point_net.train(True)
+        self._imip_loss_module.train(True)
+
         last_eval_time = time.time()
         for iteration in range(1, iterations + 1):
             curr_pair = self._next_pair()
-            curr_loss = self._train_pair(curr_pair, iteration)
+            curr_loss = self._train_pair(curr_pair, t_board_writer, iteration)
 
             if iteration % eval_frequency == 0:
                 save_info = {

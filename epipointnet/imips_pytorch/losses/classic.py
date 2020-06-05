@@ -1,23 +1,19 @@
-from abc import ABCMeta, abstractmethod
 from typing import Tuple, Dict
 
 import torch
-from torch.nn import Module
+
+from .imips import ImipLoss
 
 
-class IMIPLoss(Module, metaclass=ABCMeta):
-    def __init__(self):
-        super(ClassicIMIPLoss, self).__init__()
+class ClassicImipLoss(ImipLoss):
 
-    @abstractmethod
-    def forward_with_log_data(self, maximizer_outputs, correspondence_outputs, inlier_labels, outlier_labels):
-        pass
-
-
-class ClassicIMIPLoss(IMIPLoss):
+    def __init__(self, epsilon: float = 1e-4):
+        super(ClassicImipLoss, self).__init__()
+        self._epsilon = torch.nn.Parameter(torch.tensor([epsilon]), requires_grad=False)
 
     def forward_with_log_data(self, maximizer_outputs: torch.Tensor, correspondence_outputs: torch.Tensor,
-            inlier_labels: torch.Tensor, outlier_labels: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+                              inlier_labels: torch.Tensor, outlier_labels: torch.Tensor) -> Tuple[
+        torch.Tensor, Dict[str, torch.Tensor]]:
         # maximizer_outputs: BxCx1x1 where B == C
         # correspondence_outputs: BxCx1x1 where B == C
         # If h and w are not 1 w.r.t. maximizer_outpus and correspondence_outputs,
@@ -34,8 +30,8 @@ class ClassicIMIPLoss(IMIPLoss):
             maximizer_outputs = maximizer_outputs[:, :, center_px, center_px]
             correspondence_outputs = correspondence_outputs[:, :, center_px, center_px]
 
-        maximizer_outputs = maximizer_outputs.squeeze()  # BxCx1x1 -> BxC
-        correspondence_outputs = correspondence_outputs.squeeze()  # BxCx1x1 -> BxC
+        maximizer_outputs = torch.sigmoid(maximizer_outputs.squeeze())  # BxCx1x1 -> BxC
+        correspondence_outputs = torch.sigmoid(correspondence_outputs.squeeze())  # BxCx1x1 -> BxC
 
         # convert the label types so we can use torch.diag() on the labels
         if inlier_labels.dtype == torch.bool:
@@ -63,9 +59,10 @@ class ClassicIMIPLoss(IMIPLoss):
 
         # A lower response to a channel's patch in image 1 which corresponds with it's maximizing patch in image 2
         # will lead to a higher loss. This is called correspondence loss by imips
-        outlier_correspondence_loss = torch.sum(-1 * torch.log(aligned_outlier_correspondence_scores + epsilon))
-        if outlier_correspondence_loss.nelement() == 0:
-            outlier_correspondence_loss = torch.zeros([1], device="cuda")
+        outlier_correspondence_loss = torch.sum(-1 * torch.log(aligned_outlier_correspondence_scores + self._epsilon))
+        if aligned_outlier_correspondence_scores.nelement() == 0:
+            outlier_correspondence_loss = torch.zeros([1], requires_grad=True,
+                                                      device=outlier_correspondence_loss.device)
 
         # If a channel's maximum response is outside of a given radius about the target correspondence site, the
         # channel's response to it's maximizing patch in image 1 is minimized.
@@ -75,9 +72,9 @@ class ClassicIMIPLoss(IMIPLoss):
         # higher loss for a channel which attains its maximum outside of a given radius
         # about it's target correspondence site. This is called outlier loss by imips.
         outlier_maximizer_loss = torch.sum(
-            -1 * torch.log(torch.max(-1 * aligned_outlier_maximizer_scores + 1, epsilon)))
-        if outlier_maximizer_loss.nelement() == 0:
-            outlier_maximizer_loss = torch.zeros([1], device="cuda")
+            -1 * torch.log(torch.max(-1 * aligned_outlier_maximizer_scores + 1, self._epsilon)))
+        if aligned_outlier_maximizer_scores.nelement() == 0:
+            outlier_maximizer_loss = torch.zeros([1], requires_grad=True, device=outlier_maximizer_loss.device)
 
         outlier_loss = outlier_correspondence_loss + outlier_maximizer_loss
 
@@ -92,9 +89,9 @@ class ClassicIMIPLoss(IMIPLoss):
         # A lower response to a channel's maximizing patch in image 1 wil lead to
         # a higher loss for a channel which attains its maximum inside of a given radius
         # about it's target correspondence site. This is called inlier_loss by imips.
-        inlier_loss = torch.sum(-1 * torch.log(aligned_inlier_maximizer_scores + epsilon))
-        if inlier_loss.nelement() == 0:
-            inlier_loss = torch.zeros([1], device="cuda")
+        inlier_loss = torch.sum(-1 * torch.log(aligned_inlier_maximizer_scores + self._epsilon))
+        if aligned_inlier_maximizer_scores.nelement() == 0:
+            inlier_loss = torch.zeros([1], requires_grad=True, device=inlier_loss.device)
 
         # Finally, if a channel attains its maximum response inside of a given radius
         # about it's target correspondence site, the responses of all the other channels
@@ -103,8 +100,8 @@ class ClassicIMIPLoss(IMIPLoss):
         unaligned_inlier_index = aligned_inlier_index ^ inlier_labels.unsqueeze(1)
         unaligned_inlier_maximizer_scores = maximizer_outputs[unaligned_inlier_index]
         unaligned_maximizer_loss = torch.sum(unaligned_inlier_maximizer_scores)
-        if unaligned_maximizer_loss.nelement() == 0:
-            unaligned_maximizer_loss = torch.zeros([1], device="cuda")
+        if unaligned_inlier_maximizer_scores.nelement() == 0:
+            unaligned_maximizer_loss = torch.zeros([1], requires_grad=True, device=unaligned_maximizer_loss.device)
 
         # imips just adds the unaligned scores to the loss directly
         loss = outlier_loss + inlier_loss + unaligned_maximizer_loss

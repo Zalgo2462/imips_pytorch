@@ -1,68 +1,42 @@
+import math
+from typing import Callable, Optional, Union
+
 import torch
 import torch.nn.functional
 
+from . import convnet
+from . import hessian
 from . import imips
-import kornia.feature
+
 
 class HessConv(imips.ImipNet):
 
-    def __init__(self, num_convolutions: int = 14, input_channels: int = 1, output_channels: int = 128,
-                 bias: bool = True):
+    def __init__(self, num_convolutions: int, input_channels: int, output_channels: int, bias: bool = True,
+                 simple_conv_constructor: Optional[Callable[[int, int, int, Optional[bool]], imips.ImipNet]] = None):
         imips.ImipNet.__init__(self, input_channels, output_channels)
 
-        self._num_convolutions = num_convolutions
-        self._receptive_field_diameter = num_convolutions * 2 + 1
+        if simple_conv_constructor is None:
+            simple_conv_constructor = convnet.SimpleConv
 
+        # Add the hessian response channels to the input channels
+        input_channels *= 2
+        self._simple_conv = simple_conv_constructor(num_convolutions, input_channels, output_channels, bias=bias)
 
-
-
-        num_channels_first_half = output_channels // 2
-
-        layers_list = []
-        layers_list.extend([
-            torch.nn.Conv2d(input_channels, num_channels_first_half, kernel_size=3, bias=bias),
-            torch.nn.LeakyReLU(negative_slope=0.02)  # default for tensorflow/ imips
-        ])
-
-        for i in range((num_convolutions // 2) - 1):
-            layers_list.extend([
-                torch.nn.Conv2d(num_channels_first_half, num_channels_first_half, kernel_size=3, bias=bias),
-                torch.nn.LeakyReLU(negative_slope=0.02)
-            ])
-
-        layers_list.extend([
-            torch.nn.Conv2d(num_channels_first_half, output_channels, kernel_size=3, bias=bias),
-            torch.nn.LeakyReLU(negative_slope=0.02)
-        ])
-
-        for i in range((num_convolutions // 2) - 1):
-            layers_list.extend([
-                torch.nn.Conv2d(output_channels, output_channels, kernel_size=3, bias=bias),
-                torch.nn.LeakyReLU(negative_slope=0.02)
-            ])
-
-        self.conv_layers = torch.nn.Sequential(*layers_list)
-
-        def init_weights(module: torch.nn.Module):
-            if type(module) in [torch.nn.Conv2d]:
-                torch.nn.init.xavier_uniform_(module.weight, gain=torch.nn.init.calculate_gain('leaky_relu', 0.2))
-                if bias:
-                    torch.nn.init.constant_(module.bias, 0)
-
-        self.conv_layers.apply(init_weights)
+        min_pyramid_size = 5
+        self.hessian_module = hessian.MaxScaleHessian(
+            max_octaves=math.floor(math.log2(self._simple_conv.receptive_field_diameter() / min_pyramid_size)) + 1,
+            scales_per_octave=3,
+        )
 
     def forward(self, images: torch.Tensor, keepDim: bool = False) -> torch.Tensor:
-        # imips centers the data between [-127, 128]
-        images = images - 127
+        max_scale_hessian = self.hessian_module(images)
+        max_scale_hessian = max_scale_hessian * 255 / max_scale_hessian.max()  # scale the hessian response to [0, 255]
 
-        images = self.conv_layers(images)
-
-        if keepDim:
-            images = torch.nn.functional.pad(images, [self._num_convolutions, self._num_convolutions,
-                                                      self._num_convolutions, self._num_convolutions,
-                                                      0, 0, 0, 0], value=float('-inf'))
-
-        return images
+        output = self._simple_conv(torch.cat([images, max_scale_hessian], dim=1), keepDim=keepDim)
+        return output
 
     def receptive_field_diameter(self) -> int:
-        return self._receptive_field_diameter
+        return self._simple_conv.receptive_field_diameter()
+
+    def regularizer(self) -> Union[torch.Tensor, int, float]:
+        return self._simple_conv.regularizer()

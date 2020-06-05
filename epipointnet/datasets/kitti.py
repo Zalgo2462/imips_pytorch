@@ -82,7 +82,8 @@ class KITTIMonocularStereoPairsSequence(torch.utils.data.Dataset):
 
         # load the images
         img_path = os.path.join(self._processed_sequence_folder, "images")
-        self._image_sequence = sequence.GlobImageSequence(os.path.join(img_path, "*.png"))
+        self._image_sequence = sequence.GlobImageSequence(os.path.join(img_path, "*.png"),
+                                                          convert_to_grayscale=not color)
 
         # If the image data doesn't match the pose data, quit.
         assert len(self._image_sequence) == self._pose_matrices.shape[0]

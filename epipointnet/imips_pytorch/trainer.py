@@ -1,7 +1,8 @@
+import itertools
 import os.path
 import random
 import time
-from typing import Iterator, Callable, Union, Iterable, Tuple, Dict
+from typing import Iterator, Callable, Union, Iterable, Tuple, Dict, Optional
 
 import cv2
 import numpy as np
@@ -13,7 +14,7 @@ import epipointnet.data.pairs
 import epipointnet.datasets.image
 import epipointnet.datasets.shuffle
 import epipointnet.datasets.tum_mono
-import epipointnet.imips_pytorch.models.convnet
+import epipointnet.imips_pytorch.losses.imips
 import epipointnet.imips_pytorch.models.imips
 
 
@@ -21,38 +22,41 @@ class ImipTrainer:
 
     def __init__(self,
                  network: epipointnet.imips_pytorch.models.imips.ImipNet,
+                 loss: epipointnet.imips_pytorch.losses.imips.ImipLoss,
                  optimizer_factory: Callable[[Union[Iterable[torch.Tensor], dict]], TorchOptimizer],
                  train_dataset: torch.utils.data.Dataset,
                  eval_dataset: torch.utils.data.Dataset,
                  num_eval_samples: int,
                  save_directory: str,
-                 inlier_radius: int = 3,
-                 seed: int = 0,
+                 device: Optional[Union[torch.device, str]] = None,
+                 inlier_radius: Optional[int] = 3,
+                 seed: Optional[int] = 0,
                  ):
         self._seed = seed
         np.random.seed(self._seed)
         torch.random.manual_seed(self._seed)
         random.seed(self._seed)
 
-        self._network = network
-        self._optimizer = optimizer_factory(self._network.parameters())
+        if device is None:
+            device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self._device = device
+
+        self._network = network.to(device=self._device)
+        self._loss_module = loss.to(device=self._device)
+        self._loss = self._loss_module.forward_with_log_data
+        self._optimizer = optimizer_factory(itertools.chain(self._network.parameters(), self._loss_module.parameters()))
         self._train_dataset = train_dataset
         self._train_dataset_iter = self._create_new_train_dataset_iterator()
         self._train_eval_dataset = epipointnet.datasets.shuffle.ShuffledDataset(train_dataset, num_eval_samples)
         self._eval_dataset = epipointnet.datasets.shuffle.ShuffledDataset(eval_dataset, num_eval_samples)
         self._inlier_radius = inlier_radius
-        self._best_eval_inlier_score = torch.tensor([0], device="cuda")
-        self._t_board_writer = torch.utils.tensorboard.SummaryWriter()
+        self._best_eval_inlier_score = torch.tensor([0], device=self._device)
         self._best_checkpoint_path = os.path.join(save_directory, "imips_best.chkpt")
         self._latest_checkpoint_path = os.path.join(save_directory, "imips_latest.chkpt")
-        # self._imip_eps = float(np.finfo(np.float32).eps) # torch.log(_imip_eps) = -15.94
-        self._eps = torch.tensor(1e-4).cuda()  # suggested by imips author, torch.log(_imip_eps) = -9.2103
-
-
 
     # ################ CHECKPOINTING ################
 
-    def _load_checkpoint(self, checkpoint: dict):
+    def _load_checkpoint(self, checkpoint: dict) -> int:
         self._seed = checkpoint["seed"]
         np.random.seed(self._seed)
         torch.random.manual_seed(self._seed)
@@ -62,14 +66,16 @@ class ImipTrainer:
         self._network.load_state_dict(checkpoint["network_state_dict"])
         self._inlier_radius = checkpoint["inlier_radius"]
         self._create_new_train_dataset_iterator()
-        for i in range(0, checkpoint["iteration"]):
-            self._next_pair()
+        return checkpoint["iteration"]
+        # Resetting the data iterator takes too long
+        # for i in range(0, checkpoint["iteration"]):
+        #     self._next_pair()
 
-    def load_best_checkpoint(self):
-        self._load_checkpoint(torch.load(self._best_checkpoint_path))
+    def load_best_checkpoint(self) -> int:
+        return self._load_checkpoint(torch.load(self._best_checkpoint_path, map_location=self._device))
 
-    def load_latest_checkpoint(self):
-        self._load_checkpoint(torch.load(self._latest_checkpoint_path))
+    def load_latest_checkpoint(self) -> int:
+        return self._load_checkpoint(torch.load(self._latest_checkpoint_path, map_location=self._device))
 
     # ################ DATASET ITERATION ################
 
@@ -90,7 +96,7 @@ class ImipTrainer:
 
     @staticmethod
     def _unpack_correspondences(keypoints_xy: np.ndarray, correspondences_xy: np.ndarray,
-                                correspondence_indices: np.ndarray) -> \
+                                correspondence_indices: np.ndarray, device: Union[torch.device, str]) -> \
             Tuple[torch.Tensor, torch.Tensor]:
         """
         Converts the correspondences from their packed form to their unpacked form.
@@ -114,8 +120,8 @@ class ImipTrainer:
         correspondences_mask = np.zeros(keypoints_xy.shape[1], dtype=np.bool)
         correspondences_mask[correspondence_indices] = True
 
-        return torch.tensor(unpacked_correspondences_xy, device="cuda"), torch.tensor(correspondences_mask,
-                                                                                      device="cuda")
+        return torch.tensor(unpacked_correspondences_xy, device=device), torch.tensor(correspondences_mask,
+                                                                                      device=device)
 
     @staticmethod
     def find_correspondences(pair: epipointnet.data.pairs.CorrespondencePair,
@@ -144,12 +150,14 @@ class ImipTrainer:
         img_1_correspondences_xy, img_1_correspondences_mask = ImipTrainer._unpack_correspondences(
             img_1_keypoints_xy_np,
             img_1_packed_correspondences_xy,
-            img_1_correspondences_indices
+            img_1_correspondences_indices,
+            img_1_keypoints_xy.device
         )
         img_2_correspondences_xy, img_2_correspondences_mask = ImipTrainer._unpack_correspondences(
             img_2_keypoints_xy_np,
             img_2_packed_correspondences_xy,
             img_2_correspondences_indices,
+            img_2_keypoints_xy.device
         )
 
         # Remove any correspondences if they are in the border defined by exclude_border_px
@@ -198,7 +206,7 @@ class ImipTrainer:
                                img_1_correspondences_mask: torch.Tensor, img_2_keypoints_xy: torch.Tensor,
                                img_2_correspondences_xy: torch.Tensor, img_2_correspondences_mask: torch.Tensor,
                                inlier_distance: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        max_inlier_distance = torch.tensor([inlier_distance], device="cuda")
+        max_inlier_distance = torch.tensor([inlier_distance], device=img_1_keypoints_xy.device)
 
         # img_1_inlier_distances measures how far off the keypoints predicted in image 1
         # are from the true correspondences of the keypoints predicted from image 2
@@ -231,10 +239,10 @@ class ImipTrainer:
         keypoints_xy = keypoints_xy.to(torch.int)
 
         # this will copy the image from RAM to to the GPU,
-        image = epipointnet.datasets.image.load_image_for_torch(image_np, "cuda")
+        image = epipointnet.datasets.image.load_image_for_torch(image_np, keypoints_xy.device)
         radius = (diameter - 1) // 2
 
-        batch = torch.zeros((keypoints_xy.shape[1], image.shape[0], diameter, diameter), device="cuda")
+        batch = torch.zeros((keypoints_xy.shape[1], image.shape[0], diameter, diameter), device=keypoints_xy.device)
         for point_idx in range(keypoints_xy.shape[1]):
             keypoint_x = keypoints_xy[0, point_idx]
             keypoint_y = keypoints_xy[1, point_idx]
@@ -275,14 +283,14 @@ class ImipTrainer:
         """
 
         img_1_kp_patches = ImipTrainer.image_to_patch_batch(pair.image_1, img_1_keypoints_xy, patch_diameter)
-        img_1_corr_patches = torch.zeros_like(img_1_kp_patches, device="cuda")
+        img_1_corr_patches = torch.zeros_like(img_1_kp_patches)
         img_1_corr_patches[img_2_correspondences_mask, :, :, :] = ImipTrainer.image_to_patch_batch(
             pair.image_1,
             img_2_correspondences_xy[:, img_2_correspondences_mask],
             patch_diameter
         )
         img_2_kp_patches = ImipTrainer.image_to_patch_batch(pair.image_2, img_2_keypoints_xy, patch_diameter)
-        img_2_corr_patches = torch.zeros_like(img_2_kp_patches, device="cuda")
+        img_2_corr_patches = torch.zeros_like(img_2_kp_patches)
         img_2_corr_patches[img_1_correspondences_mask, :, :, :] = ImipTrainer.image_to_patch_batch(
             pair.image_2,
             img_1_correspondences_xy[:, img_1_correspondences_mask],
@@ -298,103 +306,6 @@ class ImipTrainer:
         #   in img 1 (img_1_correspondences_xy)
 
         return img_1_kp_patches, img_1_corr_patches, img_2_kp_patches, img_2_corr_patches
-
-    @staticmethod
-    def loss(maximizer_outputs: torch.Tensor, correspondence_outputs: torch.Tensor,
-             inlier_labels: torch.Tensor, outlier_labels: torch.Tensor, epsilon: torch.Tensor) -> Tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # maximizer_outputs: BxCx1x1 where B == C
-        # correspondence_outputs: BxCx1x1 where B == C
-        # If h and w are not 1 w.r.t. maximizer_outpus and correspondence_outputs,
-        # the center values will be extracted.
-
-        assert (maximizer_outputs.shape[0] == maximizer_outputs.shape[1] ==
-                correspondence_outputs.shape[0] == correspondence_outputs.shape[1])
-
-        assert (maximizer_outputs.shape[2] == maximizer_outputs.shape[3] ==
-                correspondence_outputs.shape[2] == correspondence_outputs.shape[3])
-
-        if maximizer_outputs.shape[2] != 1:
-            center_px = (maximizer_outputs.shape[2] - 1) // 2
-            maximizer_outputs = maximizer_outputs[:, :, center_px, center_px]
-            correspondence_outputs = correspondence_outputs[:, :, center_px, center_px]
-
-        maximizer_outputs = maximizer_outputs.squeeze()  # BxCx1x1 -> BxC
-        correspondence_outputs = correspondence_outputs.squeeze()  # BxCx1x1 -> BxC
-
-        # convert the label types so we can use torch.diag() on the labels
-        if inlier_labels.dtype == torch.bool:
-            inlier_labels = inlier_labels.to(torch.uint8)
-
-        if outlier_labels.dtype == torch.bool:
-            outlier_labels = outlier_labels.to(torch.uint8)
-
-        # The goal is to maximize each channel's response to it's patch in image 1 which corresponds
-        # with it's maximizing patch in image 2. If the patch which maximizes a channel's response in
-        # image 1 is within a given radius of the patch in image 1 which corresponds
-        # with the channel's maximizing patch in image 2, the channel is assigned a loss of 0.
-        # Otherwise, if the maximizing patch for a channel is outside of this radius, the channel's loss is
-        # set to maximize the channel's response to the patch in image 1 which corresponds
-        # with the channel's maximizing patch in image 2.
-        #
-        # Research note: why do we allow the maximum response to be within a radius? Why complicate the loss
-        # this way? Maybe try always maximizing each channel's response to the patch in image 1 which
-        # corresponds with the channel's maximizing patch in image 2.
-
-        # grabs the outlier responses where the batch index and channel index align.
-        aligned_outlier_index = torch.diag(outlier_labels)
-
-        aligned_outlier_correspondence_scores = correspondence_outputs[aligned_outlier_index]
-
-        # A lower response to a channel's patch in image 1 which corresponds with it's maximizing patch in image 2
-        # will lead to a higher loss. This is called correspondence loss by imips
-        outlier_correspondence_loss = torch.sum(-1 * torch.log(aligned_outlier_correspondence_scores + epsilon))
-        if outlier_correspondence_loss.nelement() == 0:
-            outlier_correspondence_loss = torch.zeros([1], device="cuda")
-
-        # If a channel's maximum response is outside of a given radius about the target correspondence site, the
-        # channel's response to it's maximizing patch in image 1 is minimized.
-        aligned_outlier_maximizer_scores = maximizer_outputs[aligned_outlier_index]
-
-        # A higher response to a channel's maximizing patch in image 1 will lead to a
-        # higher loss for a channel which attains its maximum outside of a given radius
-        # about it's target correspondence site. This is called outlier loss by imips.
-        outlier_maximizer_loss = torch.sum(
-            -1 * torch.log(torch.max(-1 * aligned_outlier_maximizer_scores + 1, epsilon)))
-        if outlier_maximizer_loss.nelement() == 0:
-            outlier_maximizer_loss = torch.zeros([1], device="cuda")
-
-        outlier_loss = outlier_correspondence_loss + outlier_maximizer_loss
-
-        # If a channel's maximum response is inside of a given radius about the target correspondence site, the
-        # chanel's response to it's maximizing patch in image 1 is maximized.
-
-        # grabs the inlier responses where the batch index and channel index align.
-        aligned_inlier_index = torch.diag(inlier_labels)
-
-        aligned_inlier_maximizer_scores = maximizer_outputs[aligned_inlier_index]
-
-        # A lower response to a channel's maximizing patch in image 1 wil lead to
-        # a higher loss for a channel which attains its maximum inside of a given radius
-        # about it's target correspondence site. This is called inlier_loss by imips.
-        inlier_loss = torch.sum(-1 * torch.log(aligned_inlier_maximizer_scores + epsilon))
-        if inlier_loss.nelement() == 0:
-            inlier_loss = torch.zeros([1], device="cuda")
-
-        # Finally, if a channel attains its maximum response inside of a given radius
-        # about it's target correspondence site, the responses of all the other channels
-        # to it's maximizing patch are minimized.
-        # equivalent: inlier_labels.unsqueeze(1).repeat(1, inlier_labels.shape[0]) - inlier_labels.diag()
-        unaligned_inlier_index = aligned_inlier_index ^ inlier_labels.unsqueeze(1)
-        unaligned_inlier_maximizer_scores = maximizer_outputs[unaligned_inlier_index]
-        unaligned_maximizer_loss = torch.sum(unaligned_inlier_maximizer_scores)
-        if unaligned_maximizer_loss.nelement() == 0:
-            unaligned_maximizer_loss = torch.zeros([1], device="cuda")
-
-        # imips just adds the unaligned scores to the loss directly
-        loss = outlier_loss + inlier_loss + unaligned_maximizer_loss
-
-        return loss, outlier_correspondence_loss, inlier_loss, outlier_maximizer_loss, unaligned_maximizer_loss
 
     def _train_patches(self, maximizer_patches: torch.Tensor, correspondence_patches: torch.Tensor,
                        inlier_labels: torch.Tensor,
@@ -423,28 +334,23 @@ class ImipTrainer:
         maximizer_outputs: torch.Tensor = self._network(maximizer_patches, False)
         correspondence_outputs: torch.Tensor = self._network(correspondence_patches, False)
 
-        loss, outlier_correspondence_loss, inlier_loss, \
-        outlier_maximizer_loss, unaligned_maximizer_loss = ImipTrainer.loss(
-            maximizer_outputs, correspondence_outputs, inlier_labels, outlier_labels, self._eps
-        )
+        loss, loss_logs = self._loss(maximizer_outputs, correspondence_outputs, inlier_labels, outlier_labels)
+        regularizer = self._network.regularizer()
+        loss_logs["regularizer_loss"] = regularizer.detach() if isinstance(regularizer, torch.Tensor) else regularizer
+        loss = loss + regularizer
 
         # run the optimizer with the loss
         self._optimizer.zero_grad()
         loss.backward()
         self._optimizer.step()
 
-        return {
-            "loss": loss.detach(),
-            "outlier_correspondence_loss": outlier_correspondence_loss.detach(),
-            "inlier_maximizer_loss": inlier_loss.detach(),
-            "outlier_maximizer_loss": outlier_maximizer_loss.detach(),
-            "unaligned_maximizer_loss": unaligned_maximizer_loss.detach(),
-        }
+        return loss_logs
 
-    def _train_pair(self, pair: epipointnet.data.pairs.CorrespondencePair, iteration: int) -> torch.Tensor:
+    def _train_pair(self, pair: epipointnet.data.pairs.CorrespondencePair,
+                    t_board_writer: torch.utils.tensorboard.SummaryWriter, iteration: int) -> torch.Tensor:
         # Load images up for torch
-        img_1 = epipointnet.datasets.image.load_image_for_torch(pair.image_1, "cuda")
-        img_2 = epipointnet.datasets.image.load_image_for_torch(pair.image_2, "cuda")
+        img_1 = epipointnet.datasets.image.load_image_for_torch(pair.image_1, self._device)
+        img_2 = epipointnet.datasets.image.load_image_for_torch(pair.image_2, self._device)
 
         # Extract the anchor keypoints with the network
         img_1_keypoints_xy, img_1_responses = self._network.extract_keypoints(img_1)
@@ -453,8 +359,8 @@ class ImipTrainer:
         """
         img_1_responses = img_1_responses.unsqueeze(1)  # Convert CHW to N1HW
         img_2_responses = img_2_responses.unsqueeze(1)
-        self._t_board_writer.add_images("training/Image 1 Responses", img_1_responses, iteration)
-        self._t_board_writer.add_images("training/Image 2 Responses", img_2_responses, iteration)
+        t_board_writer.add_images("training/Image 1 Responses", img_1_responses, iteration)
+        t_board_writer.add_images("training/Image 2 Responses", img_2_responses, iteration)
         """
 
         # Find the true correspondences for each anchor keypoint
@@ -467,6 +373,7 @@ class ImipTrainer:
             pair, img_1_keypoints_xy, img_2_keypoints_xy, (self._network.receptive_field_diameter() - 1) // 2
         )
 
+        """
         # Log out the anchors and true correspondences
         img_1_true_corr_img = ImipTrainer.create_correspondence_image(pair, img_1_keypoints_xy,
                                                                       img_1_correspondences_xy,
@@ -474,10 +381,11 @@ class ImipTrainer:
         img_2_true_corr_img = ImipTrainer.create_correspondence_image(pair, img_2_correspondences_xy,
                                                                       img_2_keypoints_xy,
                                                                       img_2_correspondences_mask)
-        self._t_board_writer.add_image("training/Predicted Anchors in Image 1 and True Correspondences in Image 2",
+        t_board_writer.add_image("training/Predicted Anchors in Image 1 and True Correspondences in Image 2",
                                        img_1_true_corr_img, iteration)
-        self._t_board_writer.add_image("training/Predicted Anchors in Image 2 and True Correspondences in Image 1",
+        t_board_writer.add_image("training/Predicted Anchors in Image 2 and True Correspondences in Image 1",
                                        img_2_true_corr_img, iteration)
+        """
 
         # Create the inlier/ outlier labels
         # img_1_inlier_labels is true at an index when there is a valid, true correspondence in img_1 for the
@@ -493,9 +401,8 @@ class ImipTrainer:
 
         apparent_inliers = (img_1_inlier_labels & img_2_inlier_labels).sum()
         apparent_outliers = (img_1_outlier_labels | img_2_outlier_labels).sum()
-        self._t_board_writer.add_scalar("training/apparent inliers", apparent_inliers, iteration)
-        self._t_board_writer.add_scalar("training/apparent outliers", apparent_outliers, iteration)
-        # TODO: Create visualization for inliers
+        t_board_writer.add_scalar("training/apparent inliers", apparent_inliers, iteration)
+        t_board_writer.add_scalar("training/apparent outliers", apparent_outliers, iteration)
 
         # Grab the neighborhoods about the keypoints and their true correspondences
         # Note the meaning of the img_1 and img_2 prefixes changes here.
@@ -509,32 +416,29 @@ class ImipTrainer:
             self._network.receptive_field_diameter(),
         )
 
-        self._t_board_writer.add_images("training/Image 1 Anchor Patches", img_1_anchor_patches / 255,
+        """
+        t_board_writer.add_images("training/Image 1 Anchor Patches", img_1_anchor_patches / 255,
                                         iteration)
-        self._t_board_writer.add_images("training/Image 1 Correspondence Patches", img_1_corr_patches / 255,
+        t_board_writer.add_images("training/Image 1 Correspondence Patches", img_1_corr_patches / 255,
                                         iteration)
-        self._t_board_writer.add_images("training/Image 2 Anchor Patches", img_2_anchor_patches / 255,
+        t_board_writer.add_images("training/Image 2 Anchor Patches", img_2_anchor_patches / 255,
                                         iteration)
-        self._t_board_writer.add_images("training/Image 2 Correspondence Patches", img_2_corr_patches / 255,
+        t_board_writer.add_images("training/Image 2 Correspondence Patches", img_2_corr_patches / 255,
                                         iteration)
+        """
 
         self._train_patches(
             img_1_anchor_patches, img_1_corr_patches, img_1_inlier_labels, img_1_outlier_labels
         )
 
-        losses = self._train_patches(
+        loss_logs = self._train_patches(
             img_2_anchor_patches, img_2_corr_patches, img_2_inlier_labels, img_2_outlier_labels
         )
 
-        self._t_board_writer.add_scalar("training/loss", losses["loss"], iteration)
-        self._t_board_writer.add_scalar("training/Outlier Correspondence Loss", losses["outlier_correspondence_loss"],
-                                        iteration)
-        self._t_board_writer.add_scalar("training/Outlier Maximizer Loss", losses["outlier_maximizer_loss"], iteration)
-        self._t_board_writer.add_scalar("training/Inlier Maximizer Loss", losses["inlier_maximizer_loss"], iteration)
-        self._t_board_writer.add_scalar("training/Unaligned Maximizer Loss", losses["unaligned_maximizer_loss"],
-                                        iteration)
+        for key in loss_logs:
+            t_board_writer.add_scalar("training/" + key, loss_logs[key], iteration)
 
-        return losses["loss"]
+        return loss_logs["loss"]
 
     @staticmethod
     def _count_inliers(pair: epipointnet.data.pairs.CorrespondencePair,
@@ -555,11 +459,12 @@ class ImipTrainer:
         num_apparent_inliers = apparent_inliers.sum()
         apparent_inlier_img_1_keypoints_xy = img_1_keypoints_xy[:, apparent_inliers]
 
-        num_true_inliers = torch.zeros(1, device="cuda")
+        num_true_inliers = torch.zeros([1], device=img_1_keypoints_xy.device)
 
         if num_apparent_inliers > 0:
-            max_inlier_distance = torch.tensor([inlier_distance], device="cuda")
+            max_inlier_distance = torch.tensor([inlier_distance], device=img_1_keypoints_xy.device)
             unique_inlier_img_1_keypoints_xy = apparent_inlier_img_1_keypoints_xy[:, 0:1]
+            num_true_inliers += 1  # on Apr 22nd 2020, an off by one error was discovered +1, to old results
             for i in range(1, int(num_apparent_inliers)):
                 test_inlier = apparent_inlier_img_1_keypoints_xy[:, i:i + 1]
                 if (torch.norm(unique_inlier_img_1_keypoints_xy - test_inlier, p=2, dim=0) > max_inlier_distance).all():
@@ -569,13 +474,13 @@ class ImipTrainer:
         return num_apparent_inliers, num_true_inliers
 
     def _evaluate_dataset(self, dataset: torch.utils.data.Dataset) -> Tuple[torch.Tensor, torch.Tensor]:
-        num_samples = torch.tensor([len(dataset)], device="cuda")
-        total_apparent_inliers = torch.tensor([0], device="cuda")
-        total_true_inliers = torch.tensor([0], device="cuda")
+        num_samples = torch.tensor([len(dataset)], device=self._device)
+        total_apparent_inliers = torch.tensor([0], device=self._device)
+        total_true_inliers = torch.tensor([0], device=self._device)
         for pair in dataset:
             pair: epipointnet.data.pairs.CorrespondencePair = pair
-            image_1 = epipointnet.datasets.image.load_image_for_torch(pair.image_1)
-            image_2 = epipointnet.datasets.image.load_image_for_torch(pair.image_2)
+            image_1 = epipointnet.datasets.image.load_image_for_torch(pair.image_1, device=self._device)
+            image_2 = epipointnet.datasets.image.load_image_for_torch(pair.image_2, device=self._device)
             image_1_keypoints_xy, _ = self._network.extract_keypoints(image_1)
             image_2_keypoints_xy, _ = self._network.extract_keypoints(image_2)
 
@@ -591,18 +496,22 @@ class ImipTrainer:
             raise ValueError(
                 "eval_frequency ({}) must evenly divide iterations ({})".format(eval_frequency, iterations))
 
+        t_board_writer = torch.utils.tensorboard.SummaryWriter()
+        self._network.train(True)
+        self._loss_module.train(True)
+
         last_eval_time = time.time()
         for iteration in range(1, iterations + 1):
             curr_pair = self._next_pair()
-            curr_loss = self._train_pair(curr_pair, iteration)
+            curr_loss = self._train_pair(curr_pair, t_board_writer, iteration)
             if iteration % eval_frequency == 0:
                 train_apparent_inliers_avg, train_true_inliers_avg = self._evaluate_dataset(self._train_eval_dataset)
                 eval_apparent_inliers_avg, eval_true_inliers_avg = self._evaluate_dataset(self._eval_dataset)
-                self._t_board_writer.add_scalar("training_evaluation/apparent inliers", train_apparent_inliers_avg,
-                                                iteration)
-                self._t_board_writer.add_scalar("training_evaluation/true inliers", train_true_inliers_avg, iteration)
-                self._t_board_writer.add_scalar("evaluation/apparent inliers", eval_apparent_inliers_avg, iteration)
-                self._t_board_writer.add_scalar("evaluation/true inliers", eval_true_inliers_avg, iteration)
+                t_board_writer.add_scalar("training_evaluation/apparent inliers", train_apparent_inliers_avg,
+                                          iteration)
+                t_board_writer.add_scalar("training_evaluation/true inliers", train_true_inliers_avg, iteration)
+                t_board_writer.add_scalar("evaluation/apparent inliers", eval_apparent_inliers_avg, iteration)
+                t_board_writer.add_scalar("evaluation/true inliers", eval_true_inliers_avg, iteration)
                 save_info = {
                     "inlier_radius": self._inlier_radius,
                     "iteration": iteration,

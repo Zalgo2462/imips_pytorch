@@ -4,14 +4,14 @@ from typing import Dict, Tuple
 import torch
 
 
-class IMIPLoss(torch.nn.Module, metaclass=ABCMeta):
+class ImipLoss(torch.nn.Module, metaclass=ABCMeta):
     def __init__(self):
-        super(IMIPLoss, self).__init__()
+        super(ImipLoss, self).__init__()
 
     @abstractmethod
     def forward_with_log_data(self, maximizer_outputs: torch.Tensor, correspondence_outputs: torch.Tensor,
                               inlier_labels: torch.Tensor, outlier_labels: torch.Tensor) -> Tuple[
-                              torch.Tensor, Dict[str, torch.Tensor]]:
+        torch.Tensor, Dict[str, torch.Tensor]]:
         pass
 
     def forward(self, maximizer_outputs: torch.Tensor, correspondence_outputs: torch.Tensor,

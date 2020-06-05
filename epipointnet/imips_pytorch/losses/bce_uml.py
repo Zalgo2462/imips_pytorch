@@ -7,14 +7,14 @@ from .imips import ImipLoss
 
 class BCELoss(ImipLoss):
 
-    def __init__(self, epsilon: float = 1e-4):
+    def __init__(self, bce_pos_weight: float = 1, epsilon: float = 1e-4):
         super(BCELoss, self).__init__()
         self._epsilon = torch.nn.Parameter(torch.tensor([epsilon]), requires_grad=False)
-        self._loss_module = torch.nn.BCEWithLogitsLoss(reduction="mean")
+        self._bce_module = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([bce_pos_weight]), reduction="mean")
 
     def forward_with_log_data(self, maximizer_outputs: torch.Tensor, correspondence_outputs: torch.Tensor,
                               inlier_labels: torch.Tensor, outlier_labels: torch.Tensor) -> Tuple[
-                              torch.Tensor, Dict[str, torch.Tensor]]:
+        torch.Tensor, Dict[str, torch.Tensor]]:
         # maximizer_outputs: BxCx1x1 where B == C
         # correspondence_outputs: BxCx1x1 where B == C
         # If h and w are not 1 w.r.t. maximizer_outputs and correspondence_outputs,
@@ -40,66 +40,45 @@ class BCELoss(ImipLoss):
         if outlier_labels.dtype == torch.bool:
             outlier_labels = outlier_labels.to(torch.uint8)
 
-        data_labels = inlier_labels | outlier_labels
+        has_data_labels = inlier_labels | outlier_labels
+        aligned_data_index = torch.diag(has_data_labels)
+
+        bce_labels = inlier_labels[has_data_labels].to(dtype=maximizer_outputs.dtype)
+        if bce_labels.numel() == 0:
+            bce_loss = torch.zeros([1], requires_grad=True, device=maximizer_outputs.device)
+        else:
+            bce_loss = self._bce_module(maximizer_outputs[aligned_data_index], bce_labels)
+
+        # Finally, if a channel attains its maximum response inside of a given radius
+        # about it's target correspondence site, the responses of all the other channels
+        # to it's maximizing patch are minimized.
 
         aligned_inlier_index = torch.diag(inlier_labels)
-        aligned_outlier_index = torch.diag(outlier_labels)
-        aligned_data_index = torch.diag(data_labels)
+        # equivalent: inlier_labels.unsqueeze(1).repeat(1, inlier_labels.shape[1]) - inlier_labels.diag()
+        unaligned_inlier_index = aligned_inlier_index ^ inlier_labels.unsqueeze(1)
 
-        bce_loss = self._loss_module(maximizer_outputs[aligned_data_index], data_labels.to(dtype=aligned_data_index.dtype))
+        # Changed the unaligned_maximizer_loss to NLL.
+        # The summed version of this loss would introduce a penalty on each new inlier.
+        # The meaned version of this loss over all unaligned channel responses does not.
+        # Here, we first find the mean unaligned response to each inlier producing patch, and then sum
+        # over all of the meaned responses.
 
+        # Mask out the diagonal and the rows where we don't have inliers
+        unaligned_maximizer_loss_mat = -1 * torch.log(
+            torch.max(
+                -1 * torch.sigmoid(maximizer_outputs) + 1,
+                self._epsilon
+            )
+        )
+        unaligned_maximizer_loss_mat[torch.logical_not(unaligned_inlier_index)] = 0
+        # Get the number of elements in each row so we can average the rows
+        num_unaligned_outputs = unaligned_inlier_index.sum(dim=1).clamp_min(1).unsqueeze(1)
+        unaligned_maximizer_loss = (unaligned_maximizer_loss_mat / num_unaligned_outputs).sum()
 
-
-
-
-
-
-        # The goal is to maximize each channel's response to it's patch in image 1 which corresponds
-        # with it's maximizing patch in image 2. If the patch which maximizes a channel's response in
-        # image 1 is within a given radius of the patch in image 1 which corresponds
-        # with the channel's maximizing patch in image 2, the channel is assigned a loss of 0.
-        # Otherwise, if the maximizing patch for a channel is outside of this radius, the channel's loss is
-        # set to maximize the channel's response to the patch in image 1 which corresponds
-        # with the channel's maximizing patch in image 2.
-        #
-        # Research note: why do we allow the maximum response to be within a radius? Why complicate the loss
-        # this way? Maybe try always maximizing each channel's response to the patch in image 1 which
-        # corresponds with the channel's maximizing patch in image 2.
-
-        # grabs the outlier responses where the batch index and channel index align.
-        aligned_outlier_index = torch.diag(outlier_labels)
-
-        # If a channel's maximum response is outside of a given radius about the target correspondence site, the
-        # channel's response to it's maximizing patch in image 1 is minimized.
-        aligned_outlier_maximizer_scores = maximizer_outputs[aligned_outlier_index]
-
-        # A higher response to a channel's maximizing patch in image 1 will lead to a
-        # higher loss for a channel which attains its maximum outside of a given radius
-        # about it's target correspondence site. This is called outlier loss by imips.
-        outlier_maximizer_loss = torch.mean(
-            -1 * torch.log(torch.max(-1 * aligned_outlier_maximizer_scores + 1, self._epsilon)))
-        if aligned_outlier_maximizer_scores.nelement() == 0:
-            outlier_maximizer_loss = torch.zeros([1], requires_grad=True, device=outlier_maximizer_loss.device)
-
-        # If a channel's maximum response is inside of a given radius about the target correspondence site, the
-        # chanel's response to it's maximizing patch in image 1 is maximized.
-
-        # grabs the inlier responses where the batch index and channel index align.
-        aligned_inlier_index = torch.diag(inlier_labels)
-
-        aligned_inlier_maximizer_scores = maximizer_outputs[aligned_inlier_index]
-
-        # A lower response to a channel's maximizing patch in image 1 wil lead to
-        # a higher loss for a channel which attains its maximum inside of a given radius
-        # about it's target correspondence site. This is called inlier_loss by imips.
-        inlier_loss = torch.mean(-1 * torch.log(aligned_inlier_maximizer_scores + self._epsilon))
-        if aligned_inlier_maximizer_scores.nelement() == 0:
-            inlier_loss = torch.zeros([1], requires_grad=True, device=inlier_loss.device)
-
-        loss = outlier_maximizer_loss + inlier_loss
+        loss = bce_loss + unaligned_maximizer_loss
 
         return loss, {
             "loss": loss.detach(),
-            "inlier_maximizer_loss": inlier_loss.detach(),
-            "outlier_maximizer_loss": outlier_maximizer_loss.detach(),
+            "bce_loss": bce_loss.detach(),
+            "unaligned_maximizer_loss": unaligned_maximizer_loss.detach(),
         }
