@@ -8,6 +8,7 @@ from torch.optim.optimizer import Optimizer as TorchOptimizer
 
 import epipointnet.datasets.hpatches
 import epipointnet.datasets.kitti
+import epipointnet.imips_pytorch.losses.classic
 import epipointnet.imips_pytorch.models.convnet
 import epipointnet.imips_pytorch.models.imips
 import epipointnet.imips_pytorch.trainer
@@ -40,11 +41,13 @@ def train_net():
         input_channels=3,
         output_channels=128,
     )
+    imip_loss = epipointnet.imips_pytorch.losses.classic.ClassicImipLoss()
 
-    epi_net = epipointnet.model.PatchBatchEpiPointNet(imip_net, side_info_size=0).train(True).cuda()
+    epi_net = epipointnet.model.PatchBatchEpiPointNet(imip_net, side_info_size=0)
 
     trainer = epipointnet.trainer.EpiPointNetTrainer(
         epi_net,
+        imip_loss,
         adam_optimizer_factory,
         kitti_dataset_train,
         kitti_dataset_test,

@@ -7,11 +7,10 @@ from .imips import ImipLoss
 
 class BCELoss(ImipLoss):
 
-    def __init__(self, epsilon: float = 1e-4):
+    def __init__(self, bce_pos_weight: float = 1, epsilon: float = 1e-4):
         super(BCELoss, self).__init__()
         self._epsilon = torch.nn.Parameter(torch.tensor([epsilon]), requires_grad=False)
-        self._bce_module = torch.nn.BCEWithLogitsLoss(reduction="mean")
-        self._cce_module = torch.nn.CrossEntropyLoss(reduction="mean")
+        self._bce_module = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([bce_pos_weight]), reduction="mean")
 
     @property
     def needs_correspondence_outputs(self) -> bool:
@@ -54,17 +53,37 @@ class BCELoss(ImipLoss):
         else:
             bce_loss = self._bce_module(maximizer_outputs[aligned_data_index], bce_labels)
 
-        inlier_maximizer_outputs = maximizer_outputs[inlier_labels, :]
-        inlier_maximizer_channels = torch.arange(inlier_labels.shape[0], device=inlier_labels.device)[inlier_labels]
-        if inlier_maximizer_channels.numel() == 0:
-            cce_loss = torch.zeros([1], requires_grad=True, device=maximizer_outputs.device)
-        else:
-            cce_loss = 0.25 * self._cce_module(inlier_maximizer_outputs, inlier_maximizer_channels)
+        # Finally, if a channel attains its maximum response inside of a given radius
+        # about it's target correspondence site, the responses of all the other channels
+        # to it's maximizing patch are minimized.
 
-        loss = bce_loss + cce_loss
+        aligned_inlier_index = torch.diag(inlier_labels)
+        # equivalent: inlier_labels.unsqueeze(1).repeat(1, inlier_labels.shape[1]) - inlier_labels.diag()
+        unaligned_inlier_index = aligned_inlier_index ^ inlier_labels.unsqueeze(1)
+
+        # Changed the unaligned_maximizer_loss to NLL.
+        # The summed version of this loss would introduce a penalty on each new inlier.
+        # The meaned version of this loss over all unaligned channel responses does not.
+        # Here, we first find the mean unaligned response to each inlier producing patch, and then sum
+        # over all of the meaned responses.
+
+        # Mask out the diagonal and the rows where we don't have inliers
+        unaligned_maximizer_loss_mat = -1 * torch.log(
+            torch.max(
+                -1 * torch.sigmoid(maximizer_outputs) + 1,
+                self._epsilon
+            )
+        )
+
+        unaligned_maximizer_loss_mat[torch.logical_not(unaligned_inlier_index)] = 0
+        # Get the number of elements in each row so we can average the columns
+        num_unaligned_outputs = unaligned_inlier_index.sum(dim=0).clamp_min(1).unsqueeze(0)
+        unaligned_maximizer_loss = (unaligned_maximizer_loss_mat / num_unaligned_outputs).sum()
+
+        loss = bce_loss + unaligned_maximizer_loss
 
         return loss, {
             "loss": loss.detach(),
             "bce_loss": bce_loss.detach(),
-            "cce_loss": cce_loss.detach(),
+            "unaligned_maximizer_loss": unaligned_maximizer_loss.detach(),
         }

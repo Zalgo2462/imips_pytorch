@@ -109,7 +109,7 @@ class KITTIMonocularStereoPairsSequence(torch.utils.data.Dataset):
     def __len__(self: 'KITTIMonocularStereoPairsSequence') -> int:
         return self._overlapped_frames_cum_sum[-1]
 
-    def __getitem__(self, index: int):
+    def __getitem__(self, index: int) -> pairs.CorrespondenceFundamentalMatrixPair:
         if index > len(self):
             raise IndexError()
 
@@ -270,16 +270,27 @@ class KITTIMonocularStereoPairsSequence(torch.utils.data.Dataset):
 
 class KITTIMonocularStereoPairs(torch.utils.data.Dataset):
     all_sequences = [str(x).zfill(2) for x in range(11)]
-    train_sequences = all_sequences[:5]
-    test_sequences = all_sequences[5:]
+    train_sequences = all_sequences[6:]
+    validation_sequences = all_sequences[5:6]
+    test_sequences = all_sequences[0:1]
 
     def __init__(self: 'KITTIMonocularStereoPairs',
                  root: str,
-                 train: Optional[bool] = True,
+                 split: Optional[str] = None,
                  download: Optional[bool] = True,
                  color: Optional[bool] = True,
                  minimum_KLT_overlap: Optional[float] = 0.3,
                  f_matrix_algorithm: Optional[int] = None) -> None:
+        if split == "train" or split is None:
+            split_sequences = KITTIMonocularStereoPairs.train_sequences
+        elif split == "validation":
+            split_sequences = KITTIMonocularStereoPairs.validation_sequences
+        elif split == "test":
+            split_sequences = KITTIMonocularStereoPairs.test_sequences
+        else:
+            raise ValueError("split must be 'train', 'validation', or 'test'")
+        self._split_sequences = split_sequences
+
         sequences = [KITTIMonocularStereoPairsSequence(
             root,
             seq,
@@ -287,12 +298,12 @@ class KITTIMonocularStereoPairs(torch.utils.data.Dataset):
             color,
             minimum_KLT_overlap,
             f_matrix_algorithm
-        ) for seq in (self.train_sequences if train else self.test_sequences)]
+        ) for seq in split_sequences]
 
         self._proxy = torch.utils.data.ConcatDataset(sequences)
 
     def __len__(self) -> int:
         return len(self._proxy)
 
-    def __getitem__(self, index: int) -> pairs.CorrespondencePair:
+    def __getitem__(self, index: int) -> pairs.CorrespondenceFundamentalMatrixPair:
         return self._proxy[index]

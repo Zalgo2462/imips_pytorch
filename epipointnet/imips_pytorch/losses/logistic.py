@@ -11,6 +11,10 @@ class Logistic(ImipLoss):
         super(Logistic, self).__init__()
         self._epsilon = torch.nn.Parameter(torch.tensor([epsilon]), requires_grad=False)
 
+    @property
+    def needs_correspondence_outputs(self) -> bool:
+        return False
+
     def forward_with_log_data(self, maximizer_outputs: torch.Tensor, correspondence_outputs: torch.Tensor,
                               inlier_labels: torch.Tensor, outlier_labels: torch.Tensor) -> Tuple[
         torch.Tensor, Dict[str, torch.Tensor]]:

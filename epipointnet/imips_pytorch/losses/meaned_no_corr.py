@@ -5,11 +5,15 @@ import torch
 from .imips import ImipLoss
 
 
-class NoCorrLoss(ImipLoss):
+class MeanedNoCorrImipLoss(ImipLoss):
 
     def __init__(self, epsilon: float = 1e-4):
-        super(NoCorrLoss, self).__init__()
+        super(MeanedNoCorrImipLoss, self).__init__()
         self._epsilon = torch.nn.Parameter(torch.tensor([epsilon]), requires_grad=False)
+
+    @property
+    def needs_correspondence_outputs(self) -> bool:
+        return False
 
     def forward_with_log_data(self, maximizer_outputs: torch.Tensor, correspondence_outputs: torch.Tensor,
                               inlier_labels: torch.Tensor, outlier_labels: torch.Tensor) -> Tuple[

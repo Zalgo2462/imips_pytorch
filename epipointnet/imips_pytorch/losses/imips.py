@@ -8,6 +8,10 @@ class ImipLoss(torch.nn.Module, metaclass=ABCMeta):
     def __init__(self):
         super(ImipLoss, self).__init__()
 
+    @property
+    def needs_correspondence_outputs(self) -> bool:
+        return True
+
     @abstractmethod
     def forward_with_log_data(self, maximizer_outputs: torch.Tensor, correspondence_outputs: torch.Tensor,
                               inlier_labels: torch.Tensor, outlier_labels: torch.Tensor) -> Tuple[

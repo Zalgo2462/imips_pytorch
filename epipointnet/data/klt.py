@@ -74,9 +74,15 @@ class Tracker:
     TRACK_POOR = 3
 
     def __init__(self: 'Tracker', border_margin: Optional[int] = 15, nms_radius: Optional[int] = 5):
-        self._FAST_detector = cv2.FastFeatureDetector_create()
         self._border_margin = border_margin
         self._nms_radius = nms_radius
+        self.__detector = None
+
+    @property
+    def _FAST_detector(self) -> cv2.FastFeatureDetector:
+        if self.__detector is None:
+            self.__detector = cv2.FastFeatureDetector_create()
+        return self.__detector
 
     @staticmethod
     def _pair_results_index(i: int, n: int) -> int:
@@ -259,6 +265,11 @@ class KLTPair(CorrespondencePair):
             prev_img = curr_img
 
         keypoints_xy = np.flipud(keypoints_rc)
+
+        if keypoints_xy.shape[1] == 0:  # clean up empty results for torch to get rid of negative strides
+            keypoints_xy = np.zeros(keypoints_xy.shape, dtype=keypoints_xy.dtype)
+            keypoint_indices = np.zeros(0, dtype=int)
+
         return keypoints_xy, keypoint_indices
 
     @property

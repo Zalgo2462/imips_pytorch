@@ -2,7 +2,7 @@ import bisect
 import os
 import pickle
 import shutil
-from typing import Optional, List
+from typing import Optional
 
 import docker
 import torch.utils.data
@@ -14,14 +14,9 @@ from epipointnet.datasets import sequence
 class TUMMonocularStereoPairs(torch.utils.data.Dataset):
     all_sequences = ["sequence_{0:02d}".format(i) for i in range(1, 51)]
 
-    @property
-    def train_sequences(self: 'TUMMonocularStereoPairs') -> List[str]:
-        # IMIPS only trains on 1, 2, 3, 48, 49, 50 by default
-        return [TUMMonocularStereoPairs.all_sequences[x - 1] for x in [1, 2, 3, 48, 49, 50]]
-
-    @property
-    def test_sequences(self: 'TUMMonocularStereoPairs') -> List[str]:
-        return [TUMMonocularStereoPairs.all_sequences[x - 1] for x in range(4, 48)]
+    train_sequences = all_sequences[0:3] + all_sequences[47:50]  # 1, 2, 3, 48, 49, 50
+    validation_sequences = all_sequences[4:46]  # 5-46
+    test_sequences = all_sequences[4:5] + all_sequences[46:47]  # 4, 47
 
     @property
     def raw_folder(self: 'TUMMonocularStereoPairs') -> str:
@@ -32,11 +27,10 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
         return os.path.join(self.root_folder, self.__class__.__name__, 'processed')
 
     def __init__(self: 'TUMMonocularStereoPairs', root: str,
-                 train: Optional[bool] = True,
-                 download: Optional[bool] = False,
+                 split: Optional[str] = None,
+                 download: Optional[bool] = True,
                  minimum_KLT_overlap: Optional[float] = 0.3) -> None:
         self.root_folder = os.path.abspath(root)
-        self.train = train
 
         self._tracker = klt.Tracker()
 
@@ -47,13 +41,20 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
             raise RuntimeError('Dataset not found.' +
                                ' You can use download=True to download it')
 
-        sequence_names = self.train_sequences if self.train \
-            else self.test_sequences
+        if split == "train" or split is None:
+            split_sequences = TUMMonocularStereoPairs.train_sequences
+        elif split == "validation":
+            split_sequences = TUMMonocularStereoPairs.validation_sequences
+        elif split == "test":
+            split_sequences = TUMMonocularStereoPairs.test_sequences
+        else:
+            raise ValueError("split must be 'train', 'validation', or 'test'")
+        self._split_sequences = split_sequences
 
         self._stereo_pair_generators = []
         self._generator_len_cum_sum = []
 
-        for seq_name in sequence_names:
+        for seq_name in split_sequences:
             seq_path = os.path.join(self.processed_folder, seq_name)
             img_seq = sequence.GlobImageSequence(os.path.join(
                 seq_path, "images", "*.jpg"

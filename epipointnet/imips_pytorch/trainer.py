@@ -10,8 +10,8 @@ import torch.utils.data
 import torch.utils.tensorboard
 from torch.optim.optimizer import Optimizer as TorchOptimizer
 
+import epipointnet.data.image
 import epipointnet.data.pairs
-import epipointnet.datasets.image
 import epipointnet.datasets.shuffle
 import epipointnet.datasets.tum_mono
 import epipointnet.imips_pytorch.losses.imips
@@ -239,7 +239,7 @@ class ImipTrainer:
         keypoints_xy = keypoints_xy.to(torch.int)
 
         # this will copy the image from RAM to to the GPU,
-        image = epipointnet.datasets.image.load_image_for_torch(image_np, keypoints_xy.device)
+        image = epipointnet.data.image.load_image_for_torch(image_np, keypoints_xy.device)
         radius = (diameter - 1) // 2
 
         batch = torch.zeros((keypoints_xy.shape[1], image.shape[0], diameter, diameter), device=keypoints_xy.device)
@@ -283,7 +283,7 @@ class ImipTrainer:
         """
 
         img_1_kp_patches = ImipTrainer.image_to_patch_batch(pair.image_1, img_1_keypoints_xy, patch_diameter)
-        img_1_corr_patches = torch.zeros_like(img_1_kp_patches)
+        img_1_corr_patches = torch.zeros_like(img_1_kp_patches, requires_grad=False)
         img_1_corr_patches[img_2_correspondences_mask, :, :, :] = ImipTrainer.image_to_patch_batch(
             pair.image_1,
             img_2_correspondences_xy[:, img_2_correspondences_mask],
@@ -349,8 +349,8 @@ class ImipTrainer:
     def _train_pair(self, pair: epipointnet.data.pairs.CorrespondencePair,
                     t_board_writer: torch.utils.tensorboard.SummaryWriter, iteration: int) -> torch.Tensor:
         # Load images up for torch
-        img_1 = epipointnet.datasets.image.load_image_for_torch(pair.image_1, self._device)
-        img_2 = epipointnet.datasets.image.load_image_for_torch(pair.image_2, self._device)
+        img_1 = epipointnet.data.image.load_image_for_torch(pair.image_1, self._device)
+        img_2 = epipointnet.data.image.load_image_for_torch(pair.image_2, self._device)
 
         # Extract the anchor keypoints with the network
         img_1_keypoints_xy, img_1_responses = self._network.extract_keypoints(img_1)
@@ -441,9 +441,9 @@ class ImipTrainer:
         return loss_logs["loss"]
 
     @staticmethod
-    def _count_inliers(pair: epipointnet.data.pairs.CorrespondencePair,
-                       img_1_keypoints_xy: torch.Tensor, img_2_keypoints_xy: torch.Tensor,
-                       inlier_distance: int = 3) -> Tuple[torch.Tensor, torch.Tensor]:
+    def count_inliers(pair: epipointnet.data.pairs.CorrespondencePair,
+                      img_1_keypoints_xy: torch.Tensor, img_2_keypoints_xy: torch.Tensor,
+                      inlier_distance: int = 3) -> Tuple[torch.Tensor, torch.Tensor]:
         (img_1_correspondences_xy, img_1_correspondences_mask,
          img_2_correspondences_xy, img_2_correspondences_mask) = ImipTrainer.find_correspondences(
             pair, img_1_keypoints_xy, img_2_keypoints_xy
@@ -479,12 +479,12 @@ class ImipTrainer:
         total_true_inliers = torch.tensor([0], device=self._device)
         for pair in dataset:
             pair: epipointnet.data.pairs.CorrespondencePair = pair
-            image_1 = epipointnet.datasets.image.load_image_for_torch(pair.image_1, device=self._device)
-            image_2 = epipointnet.datasets.image.load_image_for_torch(pair.image_2, device=self._device)
+            image_1 = epipointnet.data.image.load_image_for_torch(pair.image_1, device=self._device)
+            image_2 = epipointnet.data.image.load_image_for_torch(pair.image_2, device=self._device)
             image_1_keypoints_xy, _ = self._network.extract_keypoints(image_1)
             image_2_keypoints_xy, _ = self._network.extract_keypoints(image_2)
 
-            num_apparent_inliers, num_true_inliers = ImipTrainer._count_inliers(
+            num_apparent_inliers, num_true_inliers = ImipTrainer.count_inliers(
                 pair, image_1_keypoints_xy, image_2_keypoints_xy, self._inlier_radius
             )
             total_apparent_inliers = total_apparent_inliers + num_apparent_inliers
@@ -533,5 +533,5 @@ class ImipTrainer:
 
                 curr_eval_time = time.time()
                 iters_per_minute = eval_frequency / ((curr_eval_time - last_eval_time) / 60)
-                self._t_board_writer.add_scalar("performance/iterations per minute", iters_per_minute, iteration)
+                t_board_writer.add_scalar("performance/iterations per minute", iters_per_minute, iteration)
                 last_eval_time = curr_eval_time

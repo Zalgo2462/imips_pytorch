@@ -85,18 +85,21 @@ class HPatchesSequencesStereoPairs(torch.utils.data.Dataset):
 
     url: str = 'http://icvl.ee.ic.ac.uk/vbalnt/hpatches/hpatches-sequences-release.tar.gz'
     pairs_per_sequence: int = 15  # 6 choose 2 pairs
-    train_sequences: List[str] = ["v_there", "i_yellowtent", "i_boutique", "v_wapping", "i_leuven", "i_school",
-                                  "i_crownnight", "v_artisans", "v_colors", "i_ski", "v_circus", "v_tempera",
-                                  "v_london", "v_war", "i_parking", "v_bark", "v_charing", "i_indiana", "v_weapons",
-                                  "v_wormhole", "v_maskedman", "v_dirtywall", "v_wall", "v_vitro", "i_nuts",
-                                  "i_londonbridge", "i_pool", "i_pinard", "i_greentea", "v_calder", "i_lionday",
-                                  "i_crownday", "i_kions", "v_posters", "i_dome", "v_machines", "v_laptop", "v_boat",
-                                  "v_churchill", "i_pencils", "v_beyus", "v_sunseason", "v_samples", "v_cartooncity",
-                                  "v_gardens", "v_bip", "v_home", "i_veggies", "i_nescafe", "v_wounded", "i_toy",
-                                  "v_dogman", "i_duda", "i_contruction", "v_graffiti", "i_gonnenberg", "v_astronautis",
-                                  "i_ktirio", "i_castle", "i_greenhouse", "i_fenis", "i_partyfood", "v_adam",
-                                  "v_apprentices", "v_blueprint", "i_smurf", "i_objects", "v_bird", "i_melon",
-                                  "v_grace", "i_miniature", "v_bricks", "i_chestnuts", "i_village", "i_steps", "i_dc"]
+
+    train_sequences: List[str] = ['i_crownnight', 'i_dc', 'i_dome', 'i_duda', 'i_fenis', 'i_gonnenberg', 'i_greenhouse',
+                                  'i_greentea', 'i_indiana', 'i_kions', 'i_ktirio', 'i_leuven', 'i_lionday',
+                                  'i_londonbridge', 'i_melon', 'i_miniature', 'i_nescafe', 'i_nuts', 'i_objects',
+                                  'i_parking', 'i_partyfood', 'i_pencils', 'i_pinard', 'i_pool', 'i_school', 'i_ski',
+                                  'i_smurf', 'i_steps', 'i_toy', 'i_veggies', 'i_village', 'i_yellowtent', 'v_beyus',
+                                  'v_bip', 'v_bird', 'v_blueprint', 'v_boat', 'v_bricks', 'v_calder', 'v_cartooncity',
+                                  'v_charing', 'v_churchill', 'v_circus', 'v_colors', 'v_dirtywall', 'v_dogman',
+                                  'v_gardens', 'v_grace', 'v_graffiti', 'v_home', 'v_laptop', 'v_london', 'v_machines',
+                                  'v_maskedman', 'v_posters', 'v_samples', 'v_sunseason', 'v_tempera', 'v_there',
+                                  'v_vitro', 'v_wall', 'v_wapping', 'v_war', 'v_weapons', 'v_wormhole', 'v_wounded']
+
+    validation_sequences: List[str] = ['i_boutique', 'i_castle', 'i_chestnuts', 'i_contruction', 'i_crownday', 'v_adam',
+                                       'v_apprentices', 'v_artisans', 'v_astronautis', 'v_bark']
+
     test_sequences: List[str] = ["i_ajuntament", "i_resort", "i_table", "i_troulos", "i_bologna", "i_lionnight",
                                  "i_porta", "i_zion", "i_brooklyn", "i_fruits", "i_books", "i_bridger",
                                  "i_whitebuilding", "i_kurhaus", "i_salon", "i_autannes", "i_tools", "i_santuario",
@@ -135,16 +138,29 @@ class HPatchesSequencesStereoPairs(torch.utils.data.Dataset):
         return os.path.join(self.processed_folder, file_name)
 
     def __init__(self: 'HPatchesSequencesStereoPairs', root: str,
-                 train: Optional[bool] = True,
+                 split: Optional[str] = None,
                  download: Optional[bool] = False,
                  require_pose_changes: Optional[bool] = True,
                  downsample_large_images: Optional[bool] = True,
                  convert_to_grayscale: Optional[bool] = True) -> None:
         self.root_folder = root
-        self.train = train
         self.require_pose_changes = require_pose_changes
         self.downsample_large_images = downsample_large_images
         self.convert_to_grayscale = convert_to_grayscale
+
+        if split == "train" or split is None:
+            split_sequences = HPatchesSequencesStereoPairs.train_sequences
+        elif split == "validation":
+            split_sequences = HPatchesSequencesStereoPairs.validation_sequences
+        elif split == "test":
+            split_sequences = HPatchesSequencesStereoPairs.test_sequences
+        else:
+            raise ValueError("split must be 'train', 'validation', or 'test'")
+
+        if self.require_pose_changes:
+            split_sequences = [seq_folder for seq_folder in split_sequences if seq_folder.startswith('v_')]
+
+        self._split_sequences = split_sequences
 
         if download:
             self.download()
@@ -173,17 +189,8 @@ class HPatchesSequencesStereoPairs(torch.utils.data.Dataset):
             )
 
         if not self._check_processed_exists():
-
-            if self.train:
-                hpatches_folders = HPatchesSequencesStereoPairs.train_sequences
-            else:
-                hpatches_folders = HPatchesSequencesStereoPairs.test_sequences
-
-            if self.require_pose_changes:
-                hpatches_folders = [seq_folder for seq_folder in hpatches_folders if seq_folder.startswith('v_')]
-
             hpatches_folders = [
-                os.path.join(self.raw_extracted_folder, seq_folder) for seq_folder in hpatches_folders
+                os.path.join(self.raw_extracted_folder, seq_folder) for seq_folder in self._split_sequences
             ]
 
             sequences = [

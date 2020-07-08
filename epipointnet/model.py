@@ -8,38 +8,25 @@ from epipointnet.imips_pytorch.models.imips import ImipNet
 
 
 class PatchSampler(torch.nn.Module):
+    """
+    Extracts b x c x patch_diameter x patch_diameter patches from a b x c x h x w tensor
+    given patch_centers of the form b x 2. Output[b, :, :, :] is formed by cropping
+    a box of patch_diameter out of input[b, :, :, :] about patch_centers[b, :],
+    read as an xy pair.
+    """
+
     def __init__(self):
         super(PatchSampler, self).__init__()
 
     def forward(self, bchw: torch.Tensor, patch_centers: torch.Tensor, patch_diameter: int) -> torch.Tensor:
-        flow_field = torch.zeros(
-            bchw.shape[0],
-            bchw.shape[1],
-            patch_diameter,
-            patch_diameter,
-            2,
-            dtype=bchw.dtype, device=bchw.device
-        )
-        flow_field_step_x = 2.0 / bchw.shape[3]
-        flow_field_step_y = 2.0 / bchw.shape[2]
+        out = torch.zeros(bchw.shape[0], bchw.shape[1], patch_diameter, patch_diameter, device=bchw.device)
         patch_radius = patch_diameter // 2
-
-        for b in bchw.shape[0]:
-            for c in bchw.shape[1]:
-                left = -1 + (patch_centers[b, 0, c] - patch_radius) * flow_field_step_x
-                right = -1 + (patch_centers[b, 0, c] + patch_radius) * flow_field_step_x
-                top = -1 + (patch_centers[b, 1, c] - patch_radius) * flow_field_step_y
-                bottom = -1 + (patch_centers[b, 1, c] + patch_radius) * flow_field_step_y
-
-                x_grid, y_grid = torch.meshgrid([
-                    torch.arange(left, right, flow_field_step_x,
-                                 dtype=bchw.dtype, device=bchw.device),
-                    torch.arange(top, bottom, flow_field_step_y,
-                                 dtype=bchw.dtype, device=bchw.device),
-                ])
-                flow_field[b, c, :, :, :] = torch.stack((x_grid, y_grid), dim=-1)
-
-        return torch.nn.functional.grid_sample(bchw, flow_field, mode="nearest")
+        patch_centers = patch_centers.to(dtype=torch.long)
+        top_left = patch_centers - patch_radius
+        bottom_right = patch_centers + patch_radius + 1
+        for b in range(bchw.shape[0]):
+            out[b, :, :, :] = bchw[b, :, top_left[b, 1]:bottom_right[b, 1], top_left[b, 0]:bottom_right[b, 0]]
+        return out
 
 
 class SideInfoNet(torch.nn.Module):
@@ -52,7 +39,9 @@ class SideInfoNet(torch.nn.Module):
         # Upsample the input data for the desired number of spatial convolutions and run the convolutions
         # against each channel separately
         spatial_layers = [
-            torch.nn.Upsample(size=(num_convolutions * 2 + 1, num_convolutions * 2 + 1), mode='bilinear'),
+            torch.nn.Upsample(size=(num_convolutions * 2 + 1, num_convolutions * 2 + 1),
+                              mode='bilinear',
+                              align_corners=True),
         ]
         for i in range(num_convolutions):
             spatial_layers.extend([
@@ -96,7 +85,7 @@ class SideInfoNet(torch.nn.Module):
         spatially_reduced_data = self.spatial_layers(bchw)
 
         # bx2xcx1x1 -> bx2c -> 2cxb -> 1x2cxb
-        spatially_reduced_data = spatially_reduced_data.squeeze().permute(1, 0).unsqueeze(0)
+        spatially_reduced_data = spatially_reduced_data.squeeze().t().unsqueeze(0)
 
         # 1x2cxb -> 1xkxb -> 1xbxk
         return self.channel_layers(spatially_reduced_data).permute(0, 2, 1)
@@ -137,12 +126,9 @@ class PatchBatchEpiPointNet(torch.nn.Module):
         # images_2: bxcxhxw
         # image_1_patch_coords: 2xb
         # image_2_patch_coords: 2xb
-        # corr_images_1: bxcxhxw
-        # corr_images_2: bxcxhxw
 
         # The input to PatchBatchEpiPointNet._forward_train must be
         # (images_1, images_2, image_1_patch_coords, image_2_patch_coords) or
-        # (images_1, images_2, image_1_patch_coords, image_2_patch_coords, corr_images_1, corr_images_2)
         # where images_1, images_2, corr_images_1, and corr_images_2 are IMIP image patches shaped as bxcxhxw.
         # image_1_patch_coords and image_2_patch_coords should have the shape 2xb and contain the x, y positions
         # of the anchor patch centers from each image.
@@ -197,7 +183,7 @@ class PatchBatchEpiPointNet(torch.nn.Module):
         image_2_keypoints -= imip_out_2_patch_center.reshape(2, 1).flip((0,))
         image_2_keypoints += image_2_patch_coords
 
-        point_info = torch.cat((image_1_keypoints, image_2_keypoints), dim=0).permute(1, 0) \
+        point_info = torch.cat((image_1_keypoints, image_2_keypoints), dim=0).t() \
             .unsqueeze(0)  # shape: bx4 -> 1xbx4
 
         if self.side_info_net is not None:
@@ -223,32 +209,60 @@ class PatchBatchEpiPointNet(torch.nn.Module):
                       images_1: torch.Tensor,
                       images_2: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
                                                        torch.Tensor, torch.Tensor, torch.Tensor]:
-        # images_1: bxcxhxw
-        # images_2: bxcxhxw
+        # images_1: 1xc'xhxw
+        # images_2: 1xc'xhxw
 
         # Run the images through the IMIP network to produce correspondence heat maps.
-        image_1_imip_outs = self.imip_net(images_1, keepDim=True)  # shape: bxcxhxw
-        image_2_imip_outs = self.imip_net(images_2, keepDim=True)  # shape: bxcxhxw
+        image_1_imip_outs = self.imip_net(images_1, keepDim=True)  # shape: 1xcxhxw
+        image_2_imip_outs = self.imip_net(images_2, keepDim=True)  # shape: 1xcxhxw
 
-        image_1_keypoints = self.argmax(image_1_imip_outs)  # shape: bx2xc
-        image_2_keypoints = self.argmax(image_1_imip_outs)  # shape: bx2xc
+        image_1_keypoints = self.argmax(image_1_imip_outs).squeeze(0)  # shape: 1xcxhxw -> 1x2xc -> 2xc
+        image_2_keypoints = self.argmax(image_2_imip_outs).squeeze(0)  # shape: 1xcxhxw -> 1x2xc -> 2xc
+
+        point_info = torch.cat((image_1_keypoints, image_2_keypoints), dim=0).t() \
+            .unsqueeze(0)  # shape: 4xc -> cx4 -> 1xcx4
+
+        side_info_image_1_imip_outs = self.patch_sampler(
+            image_1_imip_outs.expand(image_1_imip_outs.shape[1], -1, -1, -1),  # 1xcxhxw -> cxcxhxw
+            image_1_keypoints.t(),  # 2xc -> cx2
+            Sobel2DArgMax.neighborhood_size
+        )
+
+        side_info_image_2_imip_outs = self.patch_sampler(
+            image_2_imip_outs.expand(image_2_imip_outs.shape[1], -1, -1, -1),  # 1xcxhxw -> cxcxhxw
+            image_2_keypoints.t(),  # 2xc -> cx2
+            Sobel2DArgMax.neighborhood_size
+        )
+
+        """
+        side_info_image_1_locs = image_1_keypoints.t() \
+            .unsqueeze(-1).expand(-1, -1, image_1_keypoints.shape[1])  # shape: 2xc -> cx2 -> cx2x1 -> cx2xc
+
+        side_info_image_2_locs = image_2_keypoints.t() \
+            .unsqueeze(-1).expand(-1, -1, image_2_keypoints.shape[1])  # shape: 2xc -> cx2 -> cx2x1 -> cx2xc
 
         # The side info net needs to be supplied with IMIP net output within a neighborhood about each
         # keypoint. Extract the patches around the detected keypoints to generate side info
-        # TODO: Test the patch sampler
         side_info_image_1_imip_outs = self.patch_sampler(
-            image_1_imip_outs, image_1_keypoints,
+            image_1_imip_outs.expand(image_1_imip_outs.shape[1], -1, -1, -1),  # 1xcxhxw -> cxcxhxw
+            side_info_image_1_locs,
             Sobel2DArgMax.neighborhood_size
         )  # shape: bxcxhxw
 
         side_info_image_2_imip_outs = self.patch_sampler(
-            image_1_imip_outs, image_2_keypoints,
+            image_2_imip_outs.expand(image_2_imip_outs.shape[1], -1, -1, -1),  # 1xcxhxw -> cxcxhxw
+            side_info_image_2_locs,
             Sobel2DArgMax.neighborhood_size
         )  # shape: bxcxhxw
+        """
 
-        side_info = self.side_info_net(side_info_image_1_imip_outs, side_info_image_2_imip_outs)  # shape: bxcxk
-
-        point_info = torch.cat((image_1_keypoints, image_2_keypoints), dim=1).permute(0, 2, 1)  # shape: bxcx4
+        if self.side_info_net is not None:
+            # The side info net needs to be supplied with the imip outputs. It processes every channel's response
+            # to each keypoint
+            side_info = self.side_info_net(side_info_image_1_imip_outs, side_info_image_2_imip_outs)  # shape: 1xbxk
+        else:
+            side_info = torch.zeros((1, image_1_imip_outs.shape[1], 0), device=point_info.device,
+                                    dtype=point_info.dtype)
 
         norm_f_mats, image_1_rescalings, image_2_rescalings, weights = self.normalized_eight_point_net(
             point_info,
@@ -262,11 +276,36 @@ class PatchBatchEpiPointNet(torch.nn.Module):
         return (norm_f_mats, image_1_keypoints, image_2_keypoints, weights,
                 image_1_imip_outs, image_2_imip_outs)
 
+    @torch.no_grad()
+    def find_fundamental_matrix(self, image_1: torch.Tensor, image_2: torch.Tensor) -> Tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        defer_set_train = False
+        if self.training:
+            self.train(False)
+            defer_set_train = True
+
+        # assume image is CxHxW
+        assert len(image_1.shape) == 3 and image_1.shape[0] == self.imip_net.input_channels()
+        assert len(image_2.shape) == 3 and image_2.shape[0] == self.imip_net.input_channels()
+
+        image_1 = image_1.unsqueeze(0)
+        image_2 = image_2.unsqueeze(0)
+
+        (norm_f_mats, image_1_keypoints, image_2_keypoints, weights,
+         image_1_imip_outs, image_2_imip_outs) = self.__call__(image_1, image_2)
+
+        f_est = norm_f_mats[-1] / norm_f_mats[-1][:, -1, -1]
+
+        if defer_set_train:
+            self.train(True)
+
+        return f_est, image_1_keypoints, image_2_keypoints, weights
+
     def forward(self,
                 images_1: torch.Tensor,
                 images_2: torch.Tensor,
-                image_1_patch_coords: Optional[torch.Tensor],
-                image_2_patch_coords: Optional[torch.Tensor]
+                image_1_patch_coords: Optional[torch.Tensor] = None,
+                image_2_patch_coords: Optional[torch.Tensor] = None,
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
                            torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.training:
@@ -277,7 +316,7 @@ class PatchBatchEpiPointNet(torch.nn.Module):
 
 
 """
-Uses too much ram. imipet simipconv requires 4gb per KITTI image
+Uses too much ram. imipnet simpleconv requires 4gb per KITTI image
 class ImageBatchEpiPointNet(torch.nn.Module):
     def __init__(self,
                  imipNet: ImipNet,

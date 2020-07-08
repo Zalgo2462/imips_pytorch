@@ -1,8 +1,11 @@
 from abc import ABC
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 
 import cv2
 import numpy as np
+import torch
+
+from .image import load_image_for_torch
 
 
 class ImagePair(ABC):
@@ -18,11 +21,27 @@ class ImagePair(ABC):
     def name(self) -> str:
         raise NotImplementedError()
 
+    @staticmethod
+    def collate_for_torch(pairs: List['ImagePair']):
+        image_1_tensors = [load_image_for_torch(pair.image_1) for pair in pairs]
+        image_2_tensors = [load_image_for_torch(pair.image_2) for pair in pairs]
+        names = [pair.name for pair in pairs]
+
+        return torch.stack(image_1_tensors), torch.stack(image_2_tensors), names
+
 
 class CorrespondencePair(ImagePair, ABC):
 
     def correspondences(self, pixels_xy: np.ndarray, inverse: bool = False) -> Tuple[np.ndarray, np.ndarray]:
         raise NotImplementedError()
+
+    @staticmethod
+    def collate_for_torch(pairs: List['CorrespondencePair']):
+        image_1_tensors, image_2_tensors, names = ImagePair.collate_for_torch(pairs)
+        # Batch up the correspondence functions for each pair, this likely closes over the
+        # original numpy images
+        correspondence_funcs = [pair.correspondences for pair in pairs]
+        return image_1_tensors, image_2_tensors, names, correspondence_funcs
 
 
 class FundamentalMatrixPair(ImagePair, ABC):
@@ -84,6 +103,17 @@ class FundamentalMatrixPair(ImagePair, ABC):
         pts2_virt = np.hstack((pts2_virt[0], ones))
         return pts1_virt, pts2_virt
 
+    @staticmethod
+    def collate_for_torch(pairs: List['FundamentalMatrixPair']):
+        image_1_tensors, image_2_tensors, names = ImagePair.collate_for_torch(pairs)
+        f_mats_forward = [torch.tensor(pair.f_matrix_forward, dtype=torch.float32) for pair in pairs]
+        f_mats_backward = [torch.tensor(pair.f_matrix_backward, dtype=torch.float32) for pair in pairs]
+        virt_pts = [pair.generate_virtual_points() for pair in pairs]
+        pts_1_virt = [torch.tensor(virt_pt[0], dtype=torch.float32) for virt_pt in virt_pts]
+        pts_2_virt = [torch.tensor(virt_pt[1], dtype=torch.float32) for virt_pt in virt_pts]
+        return image_1_tensors, image_2_tensors, names, torch.stack(f_mats_forward), torch.stack(f_mats_backward), \
+               torch.stack(pts_1_virt), torch.stack(pts_2_virt)
+
 
 class CorrespondenceFundamentalMatrixPair(CorrespondencePair, FundamentalMatrixPair):
 
@@ -116,3 +146,18 @@ class CorrespondenceFundamentalMatrixPair(CorrespondencePair, FundamentalMatrixP
     @property
     def name(self) -> str:
         return self._f_pair.name
+
+    def collate_for_torch(pairs: List['CorrespondenceFundamentalMatrixPair']):
+        image_1_tensors, image_2_tensors, names = ImagePair.collate_for_torch(pairs)
+        # Batch up the correspondence functions for each pair, this likely closes over the
+        # original numpy images
+        correspondence_funcs = [pair.correspondences for pair in pairs]
+
+        f_mats_forward = [torch.tensor(pair.f_matrix_forward, dtype=torch.float32) for pair in pairs]
+        f_mats_backward = [torch.tensor(pair.f_matrix_backward, dtype=torch.float32) for pair in pairs]
+        virt_pts = [pair.generate_virtual_points() for pair in pairs]
+        pts_1_virt = [torch.tensor(virt_pt[0], dtype=torch.float32) for virt_pt in virt_pts]
+        pts_2_virt = [torch.tensor(virt_pt[1], dtype=torch.float32) for virt_pt in virt_pts]
+        return image_1_tensors, image_2_tensors, correspondence_funcs, names, \
+               torch.stack(f_mats_forward), torch.stack(f_mats_backward), \
+               torch.stack(pts_1_virt), torch.stack(pts_2_virt)

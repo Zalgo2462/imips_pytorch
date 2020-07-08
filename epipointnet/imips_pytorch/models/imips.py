@@ -41,6 +41,7 @@ class ImipNet(torch.nn.Module, metaclass=abc.ABCMeta):
         # output: 1xCxHxW -> CxHxW
         output: torch.Tensor = self.__call__(image, keepDim=True).squeeze(dim=0)
 
+        # TODO: test removing the exclusion now that it is handled in the model implementation
         # don't return any keypoint that is in the receptive field radius
         # from the border
         output[:, :exclude_border_px, :] = float('-inf')

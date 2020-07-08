@@ -1,17 +1,17 @@
 from typing import Tuple, Dict
 
+import kornia.losses
 import torch
 
 from .imips import ImipLoss
 
 
-class BCELoss(ImipLoss):
+class FocalCCELoss(ImipLoss):
 
     def __init__(self, epsilon: float = 1e-4):
-        super(BCELoss, self).__init__()
+        super(FocalCCELoss, self).__init__()
         self._epsilon = torch.nn.Parameter(torch.tensor([epsilon]), requires_grad=False)
-        self._bce_module = torch.nn.BCEWithLogitsLoss(reduction="mean")
-        self._cce_module = torch.nn.CrossEntropyLoss(reduction="mean")
+        self._focal_cce_module = kornia.losses.FocalLoss(1.0, 2.0, reduction="mean")
 
     @property
     def needs_correspondence_outputs(self) -> bool:
@@ -45,26 +45,13 @@ class BCELoss(ImipLoss):
         if outlier_labels.dtype == torch.bool:
             outlier_labels = outlier_labels.to(torch.uint8)
 
-        has_data_labels = inlier_labels | outlier_labels
-        aligned_data_index = torch.diag(has_data_labels)
-
-        bce_labels = inlier_labels[has_data_labels].to(dtype=maximizer_outputs.dtype)
-        if bce_labels.numel() == 0:
-            bce_loss = torch.zeros([1], requires_grad=True, device=maximizer_outputs.device)
-        else:
-            bce_loss = self._bce_module(maximizer_outputs[aligned_data_index], bce_labels)
-
         inlier_maximizer_outputs = maximizer_outputs[inlier_labels, :]
         inlier_maximizer_channels = torch.arange(inlier_labels.shape[0], device=inlier_labels.device)[inlier_labels]
         if inlier_maximizer_channels.numel() == 0:
-            cce_loss = torch.zeros([1], requires_grad=True, device=maximizer_outputs.device)
+            loss = torch.zeros([1], requires_grad=True, device=maximizer_outputs.device)
         else:
-            cce_loss = 0.25 * self._cce_module(inlier_maximizer_outputs, inlier_maximizer_channels)
-
-        loss = bce_loss + cce_loss
+            loss = self._focal_cce_module(inlier_maximizer_outputs, inlier_maximizer_channels)
 
         return loss, {
             "loss": loss.detach(),
-            "bce_loss": bce_loss.detach(),
-            "cce_loss": cce_loss.detach(),
         }

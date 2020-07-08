@@ -59,7 +59,8 @@ class ClassicImipLoss(ImipLoss):
 
         # A lower response to a channel's patch in image 1 which corresponds with it's maximizing patch in image 2
         # will lead to a higher loss. This is called correspondence loss by imips
-        outlier_correspondence_loss = torch.sum(-1 * torch.log(aligned_outlier_correspondence_scores + self._epsilon))
+        outlier_correspondence_loss = torch.sum(-1 * torch.log(
+            torch.max(aligned_outlier_correspondence_scores, self._epsilon)))
         if aligned_outlier_correspondence_scores.nelement() == 0:
             outlier_correspondence_loss = torch.zeros([1], requires_grad=True,
                                                       device=outlier_correspondence_loss.device)
@@ -89,7 +90,7 @@ class ClassicImipLoss(ImipLoss):
         # A lower response to a channel's maximizing patch in image 1 wil lead to
         # a higher loss for a channel which attains its maximum inside of a given radius
         # about it's target correspondence site. This is called inlier_loss by imips.
-        inlier_loss = torch.sum(-1 * torch.log(aligned_inlier_maximizer_scores + self._epsilon))
+        inlier_loss = torch.sum(-1 * torch.log(torch.max(aligned_inlier_maximizer_scores, self._epsilon)))
         if aligned_inlier_maximizer_scores.nelement() == 0:
             inlier_loss = torch.zeros([1], requires_grad=True, device=inlier_loss.device)
 
