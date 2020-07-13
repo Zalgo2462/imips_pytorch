@@ -73,10 +73,10 @@ class UNet(pl.LightningModule):
 
         def double_conv(in_channels, out_channels):
             return nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+                nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode='reflect'),
                 nn.BatchNorm2d(out_channels),
                 nn.LeakyReLU(inplace=True),
-                nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+                nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, padding_mode='reflect'),
                 nn.BatchNorm2d(out_channels),
                 nn.LeakyReLU(inplace=True),
             )
@@ -100,8 +100,12 @@ class UNet(pl.LightningModule):
                 diff_y = x2.size()[2] - x1.size()[2]
                 diff_x = x2.size()[3] - x1.size()[3]
 
-                x1 = F.pad(x1, [diff_x // 2, diff_x - diff_x // 2,
-                                diff_y // 2, diff_y - diff_y // 2])
+                x1 = F.pad(
+                    x1, [
+                        diff_x // 2, diff_x - diff_x // 2,
+                        diff_y // 2, diff_y - diff_y // 2
+                    ], mode='reflect'
+                )
                 x_cat = torch.cat([x2, x1], dim=1)
                 return self.conv(x_cat)
 
