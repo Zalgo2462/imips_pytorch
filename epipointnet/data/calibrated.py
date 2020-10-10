@@ -64,7 +64,7 @@ class StdStereoFundamentalMatrixPair(FundamentalMatrixPair):
         self._name = name
 
         self.baseline_1_2 = image_1_extrinsic_matrix @ np.vstack((image_2_pose_matrix[:, -1, np.newaxis], 1))
-        self.rotation_deg = np.arccos((np.trace(image_1_pose_matrix[:, 0:3] @ image_2_pose_matrix[:, 0:3].T) - 1) / 2)
+        self.rotation_rad = np.arccos((np.trace(image_1_pose_matrix[:, 0:3] @ image_2_pose_matrix[:, 0:3].T) - 1) / 2)
         self.image_1_pose_matrix = image_1_pose_matrix
         self.image_2_pose_matrix = image_2_pose_matrix
 

@@ -65,6 +65,40 @@ class ImipNet(torch.nn.Module, metaclass=abc.ABCMeta):
             self.train(True)
         return keypoints_xy, output
 
+    @torch.no_grad()
+    def extract_top_k_keypoints(self, img: torch.Tensor, k: int):
+        # assume image is CxHxW
+        assert len(img.shape) == 3 and img.shape[0] == self.input_channels()
+
+        defer_set_train = False
+        if self.training:
+            self.train(False)
+            defer_set_train = True
+
+        output: torch.Tensor = self.__call__(img.unsqueeze(0), keepDim=True)
+
+        # non maxima suppression
+        output_nms_mask = ~(output == torch.nn.functional.max_pool2d(output, 3, stride=1, padding=1))
+
+        # HACK: set the negative outputs channel by channel to avoid 4*RAM usage from indexing
+        # see: https://github.com/pytorch/pytorch/issues/30246
+        for c in range(output.shape[1]):
+            output[0, c][output_nms_mask[0, c]] = float("-inf")
+
+        output = output.squeeze(dim=0).flatten(1)  # C x HW
+
+        topk_scores, topk_keypoints = torch.topk(output, k, -1, largest=True, sorted=True)  # C x K
+
+        keypoints_2ck = torch.zeros((2, output.shape[0], k), device=output.device, dtype=topk_scores.dtype)
+        # return values in x, y format
+        keypoints_2ck[0, :, :] = topk_keypoints % img.shape[2]
+        keypoints_2ck[1, :, :] = topk_keypoints // img.shape[2]
+
+        if defer_set_train:
+            self.train(True)
+
+        return keypoints_2ck, topk_scores
+
     def forward(self, images: torch.Tensor, keepDim: bool = False) -> torch.Tensor:
         raise NotImplementedError
 

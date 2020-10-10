@@ -9,15 +9,15 @@ from torch.optim.optimizer import Optimizer as TorchOptimizer
 import epipointnet.datasets.hpatches
 import epipointnet.datasets.kitti
 import epipointnet.datasets.tum_mono
-import epipointnet.imips_pytorch.losses.classic
+import epipointnet.imips_pytorch.losses.ohnm_classic
 import epipointnet.imips_pytorch.models.convnet
 import epipointnet.imips_pytorch.models.imips
-import epipointnet.imips_pytorch.trainer
+import epipointnet.imips_pytorch.ohnm_trainer_bm
 
 
 def train_net():
     data_root = "./data"
-    checkpoints_root = "./checkpoints/imips"
+    checkpoints_root = "./checkpoints/simple-conv"
     iterations = 100000  # 100000  # default in imips. TUM train_dataset has 2336234 pairs ...
     num_eval_samples = 50
     validation_frequency = 250  # 250  # default in imips
@@ -25,12 +25,12 @@ def train_net():
     seed = 1
 
     current_time = datetime.now().strftime('%b%d_%H-%M-%S')
-    checkpoints_dir = os.path.join(checkpoints_root, current_time + '_' + socket.gethostname())
-
+    # checkpoints_dir = os.path.join(checkpoints_root, current_time + '_' + socket.gethostname())
+    checkpoints_dir = os.path.join(checkpoints_root,
+                                   "sc-14_ohnm-1-classic-loss_best-match-sampler_" + current_time + '_' + socket.gethostname())
     os.makedirs(checkpoints_dir, exist_ok=True)
 
-    # tum_dataset = epipointnet.datasets.tum_mono.TUMMonocularStereoPairs(root=data_root, train=True, download=True)
-    kitti_dataset_train = epipointnet.datasets.kitti.KITTIMonocularStereoPairsSequence(data_root, "00", color=False)
+    tum_dataset = epipointnet.datasets.tum_mono.TUMMonocularStereoPairs(root=data_root, split="train", download=True)
 
     # hpatches_dataset = epipointnet.datasets.hpatches.HPatchesSequencesStereoPairs(
     #     root=data_root, train=False, download=True,
@@ -48,19 +48,19 @@ def train_net():
         output_channels=128,
     )
 
-    loss = epipointnet.imips_pytorch.losses.classic.ClassicImipLoss().cuda()
+    loss = epipointnet.imips_pytorch.losses.ohnm_classic.OHNMClassicImipLoss()
 
-    trainer = epipointnet.imips_pytorch.trainer.ImipTrainer(
+    trainer = epipointnet.imips_pytorch.ohnm_trainer_bm.OHNMImipTrainer(
         network,
         loss,
         adam_optimizer_factory,
-        # tum_dataset,
-        kitti_dataset_train,
+        tum_dataset,
         # hpatches_dataset,
         kitti_dataset_test,
         num_eval_samples,
         checkpoints_dir,
         inlier_radius=3,
+        num_candidate_patches=1,
         seed=seed
     )
     trainer.train(iterations, validation_frequency)

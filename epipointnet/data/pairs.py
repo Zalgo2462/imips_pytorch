@@ -1,9 +1,11 @@
+import multiprocessing
 from abc import ABC
 from typing import Tuple, Optional, List
 
 import cv2
 import numpy as np
 import torch
+import torch.utils.data
 
 from .image import load_image_for_torch
 
@@ -28,6 +30,46 @@ class ImagePair(ABC):
         names = [pair.name for pair in pairs]
 
         return torch.stack(image_1_tensors), torch.stack(image_2_tensors), names
+
+    @staticmethod
+    def mean_std_dev_dataset(dataset: torch.utils.data.Dataset, batch_size: int = 1, device="cuda"):
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            collate_fn=ImagePair.collate_for_torch,
+            num_workers=1 + multiprocessing.cpu_count() // 2,
+            pin_memory=True
+        )
+
+        first_data: ImagePair = next(iter(dataset))
+        n_channels = first_data.image_1.shape[-1] if len(first_data.image_1.shape) == 3 else 1
+
+        # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm
+        n_old_px = 0
+        mean = torch.zeros(n_channels, device=device)
+        m2 = torch.zeros(n_channels, device=device)
+
+        def update_online_moments(batch: torch.Tensor):
+            nonlocal n_old_px
+            nonlocal mean
+            nonlocal m2
+            batch = batch.permute(1, 0, 2, 3).flatten(start_dim=1).to(device=device)
+            n_new_px = batch.shape[1]
+            n_total_px = n_old_px + n_new_px
+            delta = batch.mean(dim=1) - mean
+            mean += delta * (n_new_px / n_total_px)
+            m2_new = batch.var(dim=1) * (n_new_px - 1)
+            m2 += m2_new + delta ** 2 * n_old_px * n_new_px / n_total_px
+            n_old_px = n_total_px
+            return
+
+        for data in loader:
+            update_online_moments(data[0])
+            update_online_moments(data[1])
+
+        variance = m2 / (n_old_px - 1)
+        std_dev = variance.sqrt()
+        return mean, std_dev
 
 
 class CorrespondencePair(ImagePair, ABC):

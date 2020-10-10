@@ -56,9 +56,10 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
 
         for seq_name in split_sequences:
             seq_path = os.path.join(self.processed_folder, seq_name)
-            img_seq = sequence.GlobImageSequence(os.path.join(
-                seq_path, "images", "*.jpg"
-            ), convert_to_grayscale=True)
+            img_seq = sequence.GlobImageSequence(
+                os.path.join(seq_path, "images", "*.jpg"),
+                load_as_grayscale=True,
+            )
             with open(os.path.join(seq_path, "overlap.pickle"), 'rb') as overlap_file:
                 seq_overlap = pickle.load(overlap_file)
 

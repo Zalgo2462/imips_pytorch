@@ -36,7 +36,7 @@ class HPatchesPairGenerator:
         images: List[np.ndarray] = list(iter(
             sequence.GlobImageSequence(
                 os.path.join(path, "*.ppm"),
-                convert_to_grayscale=convert_to_grayscale
+                load_as_grayscale=convert_to_grayscale
             )
         ))
         homography_paths = [os.path.join(path, "H_1_{0}".format(i)) for i in range(2, 7)]

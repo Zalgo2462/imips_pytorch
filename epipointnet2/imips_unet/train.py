@@ -26,7 +26,7 @@ checkpoint_callback = ModelCheckpoint(
     monitor='val_true_inliers',
     mode='max'
 )
-trainer = Trainer(logger=logger, gpus=[0], val_check_interval=250, max_epochs=3,
+trainer = Trainer(logger=logger, gpus=[0], val_check_interval=250, max_epochs=20,
                   checkpoint_callback=checkpoint_callback)
 unet = UNet(args)
 trainer.fit(unet)

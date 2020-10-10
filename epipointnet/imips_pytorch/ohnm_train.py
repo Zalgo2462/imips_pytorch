@@ -1,5 +1,4 @@
 import os
-import socket
 from datetime import datetime
 from typing import Union, Iterable
 
@@ -9,10 +8,10 @@ from torch.optim.optimizer import Optimizer as TorchOptimizer
 import epipointnet.datasets.hpatches
 import epipointnet.datasets.kitti
 import epipointnet.datasets.tum_mono
-import epipointnet.imips_pytorch.losses.classic
+import epipointnet.imips_pytorch.losses.ohnm_sum_bce_uml_w_corr
 import epipointnet.imips_pytorch.models.convnet
 import epipointnet.imips_pytorch.models.imips
-import epipointnet.imips_pytorch.trainer
+import epipointnet.imips_pytorch.ohnm_trainer
 
 
 def train_net():
@@ -25,12 +24,11 @@ def train_net():
     seed = 1
 
     current_time = datetime.now().strftime('%b%d_%H-%M-%S')
-    checkpoints_dir = os.path.join(checkpoints_root, current_time + '_' + socket.gethostname())
-
+    # checkpoints_dir = os.path.join(checkpoints_root, current_time + '_' + socket.gethostname())
+    checkpoints_dir = os.path.join(checkpoints_root, "test_run_dir_name_same_as_checkpoint")
     os.makedirs(checkpoints_dir, exist_ok=True)
 
-    # tum_dataset = epipointnet.datasets.tum_mono.TUMMonocularStereoPairs(root=data_root, train=True, download=True)
-    kitti_dataset_train = epipointnet.datasets.kitti.KITTIMonocularStereoPairsSequence(data_root, "00", color=False)
+    tum_dataset = epipointnet.datasets.tum_mono.TUMMonocularStereoPairs(root=data_root, split="train", download=True)
 
     # hpatches_dataset = epipointnet.datasets.hpatches.HPatchesSequencesStereoPairs(
     #     root=data_root, train=False, download=True,
@@ -48,19 +46,19 @@ def train_net():
         output_channels=128,
     )
 
-    loss = epipointnet.imips_pytorch.losses.classic.ClassicImipLoss().cuda()
+    loss = epipointnet.imips_pytorch.losses.ohnm_sum_bce_uml_w_corr.OHNMSumBCEWithCorrLoss()
 
-    trainer = epipointnet.imips_pytorch.trainer.ImipTrainer(
+    trainer = epipointnet.imips_pytorch.ohnm_trainer.OHNMImipTrainer(
         network,
         loss,
         adam_optimizer_factory,
-        # tum_dataset,
-        kitti_dataset_train,
+        tum_dataset,
         # hpatches_dataset,
         kitti_dataset_test,
         num_eval_samples,
         checkpoints_dir,
         inlier_radius=3,
+        num_candidate_patches=4,
         seed=seed
     )
     trainer.train(iterations, validation_frequency)

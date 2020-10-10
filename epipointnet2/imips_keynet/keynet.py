@@ -1,72 +1,158 @@
-import multiprocessing
-from argparse import ArgumentParser
-from typing import Tuple, List, Callable, Dict
+import math
+from typing import List
 
-import numpy as np
-import pytorch_lightning as pl
+import kornia
 import torch
-import torch.nn as nn
 # noinspection PyPep8Naming
 import torch.nn.functional as F
-from kornia import get_gaussian_kernel2d, gaussian_blur2d
-from torch.optim.rmsprop import RMSprop
-from torch.utils.data import DataLoader, Subset
 
-from epipointnet.data.pairs import CorrespondencePair
-from epipointnet.datasets.kitti import KITTIMonocularStereoPairs
-from epipointnet.datasets.tum_mono import TUMMonocularStereoPairs
 
+class KeyNetModel(torch.nn.Module):
+    def __init__(self, hparams):
+        super(KeyNetModel, self).__init__()
+        self.in_channels = 3
+        self.refinement_channels = 8
+        self.num_scales = 3
+        self.scale_factor = (1 / 1.2)
+        self.nms_size = 15
+        blur_sigma = 1.5
+        blur_ksize = int(math.ceil(2 * (2 * self.blur_sigma) + 1))  # 2 sigma out on each side
+
+        self.blur = kornia.filters.GaussianBlur2d((blur_ksize, blur_ksize), (blur_sigma, blur_sigma), 'reflect')
+        self.blur.kernel.requires_grad_(False)
+
+        self.local_norm_ksize = 65
+        self.local_norm_avg_pool = torch.nn.AvgPool2d(self.local_norm_ksize, stride=1)
+
+        self.first_order_partials = kornia.filters.SpatialGradient(mode='sobel', order=1, normalized=False)
+        self.first_order_partials.kernel.requires_grad_(False)
+        self.second_order_partials = kornia.filters.SpatialGradient(mode='sobel', order=2, normalized=False)
+        self.second_order_partials.kernel.requires_grad_(False)
+
+        self.refinement_block = torch.nn.Sequential(
+            torch.nn.Conv2d(10, self.refinement_channels, kernel_size=5),
+            torch.nn.InstanceNorm2d(self.refinement_channels),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Conv2d(self.refinement_channels, self.refinement_channels,
+                            kernel_size=5, padding=2, padding_mode='replicate'),
+            torch.nn.InstanceNorm2d(self.refinement_channels),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Conv2d(self.refinement_channels, self.refinement_channels,
+                            kernel_size=5, padding=2, padding_mode='replicate'),
+            torch.nn.InstanceNorm2d(self.refinement_channels),
+            torch.nn.ReLU(inplace=True),
+        )
+
+        self.fusion_block = torch.nn.Sequential(
+            torch.nn.Conv2d(self.num_scales * self.refinement_channels, 1,
+                            kernel_size=5, padding=2, padding_mode='replicate')
+        )
+
+    def create_pyramid(self, x: torch.Tensor) -> List[torch.Tensor]:
+        pyramid = [x]
+        del x
+        base_blurred = self.blur(pyramid[0])
+        # Create our pyramid
+        for i in range(1, self.num_scales):
+            scale = self.scale_factor ** i
+            pyramid.append(
+                F.interpolate(base_blurred, scale_factor=scale, mode='bilinear', align_corners=True)
+            )
+        return pyramid
+
+    def local_norm(self, pyramid: List[torch.Tensor]) -> List[torch.Tensor]:
+        # Compute the local norm for each of the scales
+        for i in range(self.num_scales):
+            pad = self.local_norm_ksize // 2
+            pyramid[i] = F.pad(pyramid[i], [pad, pad, pad, pad], mode='reflect')
+            pyramid_i_mean = self.local_norm_avg_pool(pyramid[i])
+            pyramid_i_sq_mean = self.local_norm_avg_pool(pyramid[i] ** 2)
+            pyramid_i_std = (pyramid_i_sq_mean - pyramid_i_mean ** 2).sqrt()
+            # keynet divides by 1 + std dev
+            pyramid[i] = (pyramid[i] - pyramid_i_mean) / (1 + pyramid_i_std)
+        return pyramid
+
+    def frozen_filters(self, pyramid: List[torch.Tensor]) -> List[torch.Tensor]:
+        for i in range(self.num_scales):
+            b, c, h, w = pyramid[i].shape
+            pyr_i_fop_bc2hw = self.first_order_partials(pyramid[i])  # dx, dy
+            pyr_i_sop_bc3hw = self.second_order_partials(pyramid[i])  # dxx, dxy, dyy
+            pyramid[i] = torch.cat([
+                pyr_i_fop_bc2hw.view(b, c * 2, h, w),  # dx, dy
+                pyr_i_sop_bc3hw.view(b, c * 3, h, w),  # dxx, dxy, dyy
+                pyr_i_fop_bc2hw.view(b, c * 2, h, w) ** 2,  # dx ^ 2, dy ^2
+                pyr_i_fop_bc2hw[:, :, 0, :, :] * pyr_i_fop_bc2hw[:, :, 1, :, :],  # dx * dy
+                pyr_i_sop_bc3hw[:, :, 0, :, :] * pyr_i_sop_bc3hw[:, :, 2, :, :],  # dxx * dyy
+                pyr_i_sop_bc3hw[:, :, 1, :, :] ** 2  # dxy ^ 2
+            ], dim=1)
+        return pyramid
+
+    def learnable_refinement(self, pyramid: List[torch.Tensor]) -> List[torch.Tensor]:
+        for i in range(self.num_scales):
+            pyramid[i] = self.refinement_block(pyramid[i])
+        return pyramid
+
+    def merge_pyramid(self, pyramid: List[torch.Tensor]) -> torch.Tensor:
+        b, c, h, w = pyramid[0].shape
+        merged = torch.zeros((b, c * self.num_scales, h, w), device=pyramid[0].device, dtype=pyramid[0].dtype)
+        merged[:, 0:c, :, :] = pyramid[0]
+        for i in range(1, self.num_scales):
+            merged[:, c * i:c * (i + 1), :, :] = F.interpolate(pyramid[i], (h, w), mode='bilinear', align_corners=True)
+        return merged
+
+    def forward(self, x):
+        if x.shape[1] == 3:
+            x = kornia.color.rgb_to_grayscale(x)
+
+        pyramid = self.create_pyramid(x)
+        del x
+
+        pyramid = self.local_norm(pyramid)
+        pyramid = self.frozen_filters(pyramid)
+        pyramid = self.learnable_refinement(pyramid)
+        merged_pyramid = self.merge_pyramid(pyramid)
+        del pyramid
+        merged_pyramid = self.fusion_block(merged_pyramid)
+
+
+"""
 
 class UNet(pl.LightningModule):
     def __init__(self, hparams):
         super(UNet, self).__init__()
         self.save_hyperparameters()
 
-        """ for loading checkpoints without hyperparameters
-        class temp_hparams:
-            train_set = "kitti"
-            eval_set = "kitti"
-            test_set = "kitti"
-            data_root = "./data"
-            n_channels = 3
-            n_classes = 128
-            batch_size = 4
-            n_eval_samples = 64
-            max_inlier_distance = 6
-        hparams = temp_hparams()
-        """
-
         self.data_root = hparams.data_root
         self.n_channels = hparams.n_channels
         self.n_classes = hparams.n_classes
         self.batch_size = hparams.batch_size
 
-        kitti_scale = 0.4  # 0.33  # 122, 404
+        kitti_scale = 0.4  #0.33  # 122, 404
         tum_scale = 0.25
 
         if hparams.train_set == "kitti":
-            self.train_set = KITTIMonocularStereoPairs(self.data_root, "train", color=False, minimum_KLT_overlap=.99)
+            self.train_set = KITTIMonocularStereoPairs(self.data_root, "train", color=True)
             self.train_scale = kitti_scale
-        elif hparams.train_set == "tum_mono":
-            self.train_set = TUMMonocularStereoPairs(self.data_root, "train", minimum_KLT_overlap=.99)
+        elif hparams.train_set == "tum":
+            self.train_set = TUMMonocularStereoPairs(self.data_root, "train")
             self.train_scale = tum_scale
             assert self.n_channels == 1
 
         if hparams.eval_set == "kitti":
-            self.eval_set = Subset(KITTIMonocularStereoPairs(self.data_root, "validation", color=False),
+            self.eval_set = Subset(KITTIMonocularStereoPairs(self.data_root, "validation", color=True),
                                    range(hparams.n_eval_samples))
             self.eval_scale = kitti_scale
-        elif hparams.eval_set == "tum_mono":
+        elif hparams.eval_set == "tum":
             self.eval_set = Subset(TUMMonocularStereoPairs(self.data_root, "validation"),
                                    range(hparams.n_eval_samples))
             self.eval_scale = tum_scale
             assert self.n_channels == 1
 
         if hparams.test_set == "kitti":
-            self.test_set = Subset(KITTIMonocularStereoPairs(self.data_root, "test", color=False),
+            self.test_set = Subset(KITTIMonocularStereoPairs(self.data_root, "test", color=True),
                                    range(hparams.n_eval_samples))
             self.test_scale = kitti_scale
-        elif hparams.test_set == "tum_mono":
+        elif hparams.test_set == "tum":
             self.test_set = Subset(TUMMonocularStereoPairs(self.data_root, "test"),
                                    range(hparams.n_eval_samples))
             self.test_scale = tum_scale
@@ -339,8 +425,7 @@ class UNet(pl.LightningModule):
                     num_negative = px_per_channel - num_positive
                     weights[b, c] = (1 / num_inliers) * (1 / num_negative) * (1 / (1 + pos_weight))
                     weights[b, c, in_mask_to_ul[b, 1, c]:in_mask_to_br[b, 1, c],
-                    in_mask_to_ul[b, 0, c]:in_mask_to_br[b, 0, c]] = (1 / num_inliers) * (1 / num_positive) * (
-                                pos_weight / (1 + pos_weight))
+                    in_mask_to_ul[b, 0, c]:in_mask_to_br[b, 0, c]] = (1 / num_inliers) * (1 / num_positive) * (pos_weight / (1 + pos_weight))
 
                     # ensure other channels don't learn this inlier
                     decorr_mask[b, c + 1:, in_mask_to_ul[b, 1, c]:in_mask_to_br[b, 1, c],
@@ -355,63 +440,6 @@ class UNet(pl.LightningModule):
                         out_mask_from_ul[b, 0, c]:out_mask_from_br[b, 0, c]]
 
         return label_map, weights, outlier_mask, decorr_mask
-
-    """ Did not work, channels converged to same solution (found out i was zeroing out the training data x.x)
-    def draw_label_map(self, logits: torch.Tensor, keypoints_xy: torch.Tensor,
-                       inliers: torch.Tensor, outliers: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        image_br = torch.tensor(logits.shape[2:4],
-                                device=self.device,
-                                dtype=torch.long).flip(0).view(1, 2, 1).expand_as(keypoints_xy)
-
-        label_map = torch.zeros_like(logits)
-        weights = torch.zeros_like(logits)
-        lm_ul = (torch.round(keypoints_xy) - self.label_mask.shape[0] // 2).to(dtype=torch.long)
-        lm_br = (torch.round(keypoints_xy) + self.label_mask.shape[0] // 2 + 1).to(dtype=torch.long)
-
-        mask_from_ul = (-lm_ul).clamp_min_(0)
-        mask_from_br = torch.min(lm_br, image_br) - lm_ul
-
-        mask_to_ul = lm_ul.clamp_min_(0)
-        mask_to_br = torch.min(lm_br, image_br)
-
-        # Draw in the negative targets to prevent channels from learning the same solutions
-        # Only one channel will have positive weights for any given keypoint
-        for b in range(logits.shape[0]):
-            for c in range(logits.shape[1]):
-                if outliers[b, c]:
-                    label_map[b, :, mask_to_ul[b, 1, c]:mask_to_br[b, 1, c],
-                    mask_to_ul[b, 0, c]:mask_to_br[b, 0, c]] = 0
-                    weights[b, c, mask_to_ul[b, 1, c]:mask_to_br[b, 1, c],
-                    mask_to_ul[b, 0, c]:mask_to_br[b, 0, c]] = 1
-
-        for b in range(logits.shape[0]):
-            for c in range(logits.shape[1]):
-                if inliers[b, c]:
-                    label_map[b, :c, mask_to_ul[b, 1, c]:mask_to_br[b, 1, c],
-                    mask_to_ul[b, 0, c]:mask_to_br[b, 0, c]] -= \
-                        self.label_mask[mask_from_ul[b, 1, c]:mask_from_br[b, 1, c],
-                        mask_from_ul[b, 0, c]:mask_from_br[b, 0, c]]
-                    label_map[b, :c, mask_to_ul[b, 1, c]:mask_to_br[b, 1, c],
-                    mask_to_ul[b, 0, c]:mask_to_br[b, 0, c]].clamp_min_(0)
-                    weights[b, :c, mask_to_ul[b, 1, c]:mask_to_br[b, 1, c],
-                    mask_to_ul[b, 0, c]:mask_to_br[b, 0, c]] = 1
-
-                    label_map[b, c, mask_to_ul[b, 1, c]:mask_to_br[b, 1, c],
-                    mask_to_ul[b, 0, c]:mask_to_br[b, 0, c]] = \
-                        self.label_mask[mask_from_ul[b, 1, c]:mask_from_br[b, 1, c],
-                        mask_from_ul[b, 0, c]:mask_from_br[b, 0, c]]
-                    weights[b, c, mask_to_ul[b, 1, c]:mask_to_br[b, 1, c],
-                    mask_to_ul[b, 0, c]:mask_to_br[b, 0, c]] = 1
-
-        negative_mask = (weights == 1) & (label_map == 0)
-        positive_mask = (weights == 1) & (label_map != 0)
-        num_negative = negative_mask.sum().to(self.dtype)
-        num_positive = positive_mask.sum().to(self.dtype)
-        pos_weight = num_negative / num_positive
-        weights[positive_mask] = pos_weight
-
-        return label_map, weights
-    """
 
     def count_inliers(self, inlier_labels: torch.Tensor, keypoints_xy: torch.Tensor) -> Tuple[
         torch.Tensor, torch.Tensor]:
@@ -433,6 +461,7 @@ class UNet(pl.LightningModule):
     def training_step(self, batch, batch_nb):
         # split out the batch data
         image_1_tensors, image_2_tensors, names, correspondence_funcs = batch
+        from torchvision.models.detection import fasterrcnn_resnet50_fpn
         # resize the images so we have enough RAM
         image_1_tensors = gaussian_blur2d(image_1_tensors, (5, 5), (2, 2))
         image_1_tensors = F.interpolate(image_1_tensors, scale_factor=self.train_scale)
@@ -535,12 +564,13 @@ class UNet(pl.LightningModule):
     def add_model_specific_args(parent_parser: ArgumentParser):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
         parser.add_argument('--data_root', default="./data")
-        parser.add_argument('--train_set', choices=["kitti", "tum_mono"], default="tum_mono")
+        parser.add_argument('--train_set', choices=["kitti", "tum_mono"], default="kitti")
         parser.add_argument('--eval_set', choices=["kitti", "tum_mono"], default="kitti")
         parser.add_argument('--test_set', choices=["kitti", "tum_mono"], default="kitti")
         parser.add_argument('--n_eval_samples', type=int, default=64)
-        parser.add_argument('--n_channels', type=int, default=1)
+        parser.add_argument('--n_channels', type=int, default=3)
         parser.add_argument('--n_classes', type=int, default=128)
         parser.add_argument('--batch_size', type=int, default=4)
         parser.add_argument('--max_inlier_distance', type=float, default=3)
         return parser
+"""
