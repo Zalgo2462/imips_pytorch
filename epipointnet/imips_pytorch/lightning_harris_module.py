@@ -11,7 +11,9 @@ import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader
 
+import epipointnet.imips_pytorch.losses.ohnm_avg_no_ocl
 import epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_bce
+import epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_bce_no_ocl
 import epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_classic
 import epipointnet.imips_pytorch.models.convnet
 import epipointnet.imips_pytorch.models.harris
@@ -29,7 +31,9 @@ model_registry = {
 
 loss_registry = {
     "outlier-balanced-classic": epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_classic.OHNMClassicImipLoss,
-    "outlier-balanced-bce-bce-uml": epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_bce.OHNMBCELoss
+    "outlier-balanced-bce-bce-uml": epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_bce.OHNMBCELoss,
+    "outlier-balanced-bce-no-ocl": epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_bce_no_ocl.OHNMBCELossNoOCL,
+    "ohnm-avg-no-ocl": epipointnet.imips_pytorch.losses.ohnm_avg_no_ocl.OHNMAvgLossNoOCL,
 }
 
 megadepth_datasets = {
@@ -190,7 +194,7 @@ class IMIPLightning(pl.LightningModule):
 
     def preprocess_input_image(self, image):
         # normalize image and create harris corners
-        image = (image / 255.0 / 2.0) - 1.0  # scale to [-1, 1]
+        image = (image / 127.5) - 1.0  # scale to [-1, 1]
 
         # convert to grayscale
         image_gray = kornia.color.rgb_to_grayscale(image) if image.shape[0] == 3 else image

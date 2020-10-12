@@ -72,17 +72,21 @@ class OHNMClassicImipLoss(ImipLoss):
         expanded_inlier_labels[maximum_patch_index] = inlier_labels
 
         has_data_labels = inlier_labels | outlier_labels  # B
-        expanded_outlier_labels = (has_data_labels.repeat_interleave(num_patches_per_channel) &
-                                   torch.logical_not(expanded_inlier_labels).to(dtype=torch.uint8))
+        expanded_has_data_labels = has_data_labels.repeat_interleave(num_patches_per_channel)
+        expanded_outlier_labels = (
+                expanded_has_data_labels & torch.logical_not(expanded_inlier_labels).to(dtype=torch.uint8)
+        )
 
         maxima_inlier_index_2d = expanded_inlier_labels[:, None] * torch.repeat_interleave(
-            torch.eye(maximizer_outputs.shape[1], device=maximizer_outputs.device, dtype=torch.uint8),
-            num_patches_per_channel, dim=0
+            torch.eye(
+                maximizer_outputs.shape[1], device=expanded_inlier_labels.device, dtype=expanded_inlier_labels.dtype
+            ), num_patches_per_channel, dim=0
         )
 
         maxima_outlier_index_2d = expanded_outlier_labels[:, None] * torch.repeat_interleave(
-            torch.eye(maximizer_outputs.shape[1], device=maximizer_outputs.device, dtype=torch.uint8),
-            num_patches_per_channel, dim=0
+            torch.eye(
+                maximizer_outputs.shape[1], device=expanded_outlier_labels.device, dtype=expanded_outlier_labels.dtype
+            ), num_patches_per_channel, dim=0
         )
 
         if maxima_outlier_index_2d.sum() == 0:

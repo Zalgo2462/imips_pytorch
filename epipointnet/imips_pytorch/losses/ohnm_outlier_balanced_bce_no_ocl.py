@@ -5,11 +5,10 @@ import torch
 from .imips import ImipLoss
 
 
-# uses NLL to compute BCEs rather than pytorch module
-class OHNMClassicImipLoss(ImipLoss):
+class OHNMBCELossNoOCL(ImipLoss):
 
     def __init__(self, epsilon: float = 1e-4):
-        super(OHNMClassicImipLoss, self).__init__()
+        super(OHNMBCELossNoOCL, self).__init__()
         self._epsilon = torch.nn.Parameter(torch.tensor([epsilon]), requires_grad=False)
         self._bce_maxima_outlier_weights = torch.nn.ParameterDict({
             str(1): torch.nn.Parameter(torch.tensor(1.0, dtype=torch.float32), requires_grad=False)
@@ -41,11 +40,13 @@ class OHNMClassicImipLoss(ImipLoss):
         return self._bce_maxima_outlier_weights[nppc_str]
 
     def forward_with_log_data(self, maximizer_outputs: torch.Tensor, correspondence_outputs: torch.Tensor,
-                              inlier_labels: torch.Tensor, outlier_labels: torch.Tensor) -> Tuple[
-        torch.Tensor, Dict[str, torch.Tensor]]:
-        # maximizer_outputs: BxCx1x1 where B == C
+                              inlier_labels: torch.Tensor, outlier_labels: torch.Tensor) \
+            -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        # maximizer_outputs: BNxCx1x1 where B == C
         # correspondence_outputs: BxCx1x1 where B == C
-        # If h and w are not 1 w.r.t. maximizer_outpus and correspondence_outputs,
+        # inlier_labels: B
+        # outlier_labels: B
+        # If h and w are not 1 w.r.t. maximizer_outputs and correspondence_outputs,
         # the center values will be extracted.
 
         assert (maximizer_outputs.shape[0] % maximizer_outputs.shape[1] == 0)
@@ -58,8 +59,8 @@ class OHNMClassicImipLoss(ImipLoss):
             center_px = (correspondence_outputs.shape[2] - 1) // 2
             correspondence_outputs = correspondence_outputs[:, :, center_px, center_px]
 
-        maximizer_outputs = torch.sigmoid(maximizer_outputs.squeeze())  # BxCx1x1 -> BxC
-        correspondence_outputs = torch.sigmoid(correspondence_outputs.squeeze())  # BxCx1x1 -> BxC
+        maximizer_outputs = maximizer_outputs.squeeze()  # BxCx1x1 -> BxC
+        # correspondence_outputs = correspondence_outputs.squeeze()  # BxCx1x1 -> BxC
 
         # convert the label types so we can use torch.diag() on the labels
         if inlier_labels.dtype == torch.bool:
@@ -68,78 +69,81 @@ class OHNMClassicImipLoss(ImipLoss):
         if outlier_labels.dtype == torch.bool:
             outlier_labels = outlier_labels.to(torch.uint8)
 
+        """
+        # Boost responses to correspondence patches if the channel returned all outliers
         corr_outlier_index_2d = torch.diag(outlier_labels)
-
         aligned_outlier_corr_outputs = correspondence_outputs[corr_outlier_index_2d]
+        aligned_corr_labels = torch.ones_like(aligned_outlier_corr_outputs)
         if aligned_outlier_corr_outputs.numel() == 0:
-            outlier_correspondence_loss = None
+            aligned_corr_losses = None
         else:
-            outlier_correspondence_loss = torch.sum(-1 * torch.log(
-                torch.max(aligned_outlier_corr_outputs, self._epsilon)))
+            aligned_corr_losses = torch.nn.functional.binary_cross_entropy_with_logits(
+                aligned_outlier_corr_outputs, aligned_corr_labels, reduction="sum"
+            )
+        """
 
-        # expand inlier_labels by num_patches_per_channel
+        # expand inlier_labels and has_data_labels by num_patches_per_channel
         # inlier should begin every segment of (num patches per channel)
         num_patches_per_channel = maximizer_outputs.shape[0] // maximizer_outputs.shape[1]
 
         expanded_inlier_labels = torch.zeros(
             inlier_labels.shape[0] * num_patches_per_channel,
-            dtype=torch.uint8, device=inlier_labels.device
+            dtype=inlier_labels.dtype, device=inlier_labels.device
         )
         maximum_patch_index = torch.arange(0, maximizer_outputs.shape[0], num_patches_per_channel)
         expanded_inlier_labels[maximum_patch_index] = inlier_labels
 
         has_data_labels = inlier_labels | outlier_labels  # B
-        expanded_outlier_labels = (has_data_labels.repeat_interleave(num_patches_per_channel) &
-                                   torch.logical_not(expanded_inlier_labels).to(dtype=torch.uint8))
+        expanded_has_data_labels = has_data_labels.repeat_interleave(num_patches_per_channel)
 
-        maxima_inlier_index_2d = expanded_inlier_labels[:, None] * torch.repeat_interleave(
-            torch.eye(maximizer_outputs.shape[1], device=maximizer_outputs.device, dtype=torch.uint8),
-            num_patches_per_channel, dim=0
-        )
-
-        maxima_outlier_index_2d = expanded_outlier_labels[:, None] * torch.repeat_interleave(
-            torch.eye(maximizer_outputs.shape[1], device=maximizer_outputs.device, dtype=torch.uint8),
-            num_patches_per_channel, dim=0
-        )
-
-        aligned_outlier_maximizer_scores = maximizer_outputs[maxima_outlier_index_2d]
-        if aligned_outlier_maximizer_scores.numel() == 0:
-            outlier_maximizer_loss = None
+        maxima_bce_labels = expanded_inlier_labels[expanded_has_data_labels].to(dtype=maximizer_outputs.dtype)
+        if maxima_bce_labels.numel() == 0:
+            maxima_losses = None
         else:
-            outlier_maximizer_loss = self._get_bce_maxima_outlier_weight(num_patches_per_channel) * torch.sum(
-                -1 * torch.log(torch.max(-1 * aligned_outlier_maximizer_scores + 1, self._epsilon)))
+            maxima_weights = torch.ones_like(maxima_bce_labels)
+            maxima_weights[~(maxima_bce_labels.to(dtype=torch.bool))] = self._get_bce_maxima_outlier_weight(
+                num_patches_per_channel)
 
-        aligned_inlier_maximizer_scores = maximizer_outputs[maxima_inlier_index_2d]
-        if aligned_inlier_maximizer_scores.numel() == 0:
-            inlier_loss = None
-        else:
-            inlier_loss = torch.sum(-1 * torch.log(
-                torch.max(aligned_inlier_maximizer_scores, self._epsilon)))
+            maxima_has_data_index_2d = torch.repeat_interleave(
+                has_data_labels[:, None] * torch.eye(
+                    maximizer_outputs.shape[1], device=has_data_labels.device, dtype=torch.uint8
+                ),
+                num_patches_per_channel, dim=0
+            )  # BNxC
+
+            maxima_losses = torch.nn.functional.binary_cross_entropy_with_logits(
+                maximizer_outputs[maxima_has_data_index_2d], maxima_bce_labels, maxima_weights, reduction="sum"
+            )
 
         # Finally, if a channel attains its maximum response inside of a given radius
         # about it's target correspondence site, the responses of all the other channels
         # to it's maximizing patch are minimized.
 
+        # remove non-maxima patches from maximizer outputs
         maximizer_outputs = maximizer_outputs[maximum_patch_index]  # BxC where B==C
-        # equivalent: inlier_labels.unsqueeze(1).repeat(1, inlier_labels.shape[0]) - inlier_labels.diag()
-        unaligned_inlier_index = torch.diag(inlier_labels) ^ inlier_labels.unsqueeze(1)
-        unaligned_inlier_maximizer_scores = maximizer_outputs[unaligned_inlier_index]
-        unaligned_maximizer_loss = torch.sum(unaligned_inlier_maximizer_scores)
-        if unaligned_inlier_maximizer_scores.nelement() == 0:
-            unaligned_maximizer_loss = torch.zeros([1], requires_grad=True, device=unaligned_maximizer_loss.device)
+
+        aligned_inlier_index = torch.diag(inlier_labels)
+        # equivalent: inlier_labels.unsqueeze(1).repeat(1, inlier_labels.shape[1]) - inlier_labels.diag()
+        unaligned_inlier_index = aligned_inlier_index ^ inlier_labels.unsqueeze(1)
+        # unaligned_inlier_index = unaligned_inlier_index.triu()  # break ties
+        unaligned_inlier_outputs = maximizer_outputs[unaligned_inlier_index]
+
+        if unaligned_inlier_outputs.numel() == 0:
+            unaligned_maxima_losses = None
+        else:
+            unaligned_bce_labels = torch.zeros_like(unaligned_inlier_outputs)
+            unaligned_maxima_losses = torch.nn.functional.binary_cross_entropy_with_logits(
+                unaligned_inlier_outputs, unaligned_bce_labels, reduction="sum")
 
         total_loss = torch.zeros(1, device=maximizer_outputs.device, dtype=maximizer_outputs.dtype, requires_grad=True)
 
-        # imips just adds the unaligned scores to the loss directly
-        total_loss = self._add_if_not_none(total_loss, outlier_correspondence_loss)
-        total_loss = self._add_if_not_none(total_loss, outlier_maximizer_loss)
-        total_loss = self._add_if_not_none(total_loss, inlier_loss)
-        total_loss = self._add_if_not_none(total_loss, unaligned_maximizer_loss)
+        total_loss = self._add_if_not_none(total_loss, maxima_losses)
+        # total_loss = self._add_if_not_none(total_loss, aligned_corr_losses)
+        total_loss = self._add_if_not_none(total_loss, unaligned_maxima_losses)
 
         return total_loss, {
             "loss": total_loss.detach(),
-            "outlier_correspondence_loss": self._detach_if_not_none(outlier_correspondence_loss),
-            "outlier_maximizer_loss": self._detach_if_not_none(outlier_maximizer_loss),
-            "inlier_maximizer_loss": self._detach_if_not_none(inlier_loss),
-            "unaligned_maximizer_loss": self._detach_if_not_none(unaligned_maximizer_loss),
+            "bce_maximizer_loss": self._detach_if_not_none(maxima_losses),
+            # "outlier_correspondence_loss": self._detach_if_not_none(aligned_corr_losses),
+            "unaligned_maximizer_loss": self._detach_if_not_none(unaligned_maxima_losses)
         }

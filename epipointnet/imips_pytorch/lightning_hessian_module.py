@@ -5,15 +5,19 @@ from argparse import ArgumentParser
 from datetime import datetime
 from typing import Tuple, List, Dict
 
+import kornia
 import numpy as np
 import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader
 
+import epipointnet.imips_pytorch.losses.ohnm_avg_no_ocl
 import epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_bce
+import epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_bce_no_ocl
 import epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_classic
 import epipointnet.imips_pytorch.models.convnet
-import epipointnet.imips_pytorch.models.hess_conv
+import epipointnet.imips_pytorch.models.harris
+import epipointnet.imips_pytorch.models.hessian
 import epipointnet.imips_pytorch.models.strided_conv
 from epipointnet.data.pairs import CorrespondencePair
 from epipointnet.datasets.colmap import COLMAPStereoPairs
@@ -22,14 +26,15 @@ from epipointnet.datasets.shuffle import ShuffledDataset
 from epipointnet.datasets.tum_mono import TUMMonocularStereoPairs
 
 model_registry = {
-    "simple-conv": epipointnet.imips_pytorch.models.convnet.SimpleConv,
-    "hess-simple-conv": epipointnet.imips_pytorch.models.hess_conv.HessConv,
-    "strided-simple-conv": epipointnet.imips_pytorch.models.strided_conv.StridedConv,
+    "simple-conv": epipointnet.imips_pytorch.models.convnet.SimpleConvNoNorm,
+    "strided-simple-conv": epipointnet.imips_pytorch.models.strided_conv.StridedConvNoNorm,
 }
 
 loss_registry = {
     "outlier-balanced-classic": epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_classic.OHNMClassicImipLoss,
-    "outlier-balanced-bce-bce-uml": epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_bce.OHNMBCELoss
+    "outlier-balanced-bce-bce-uml": epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_bce.OHNMBCELoss,
+    "outlier-balanced-bce-no-ocl": epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_bce_no_ocl.OHNMBCELossNoOCL,
+    "outlier-balanced-avg-no-ocl": epipointnet.imips_pytorch.losses.ohnm_avg_no_ocl.OHNMAvgLossNoOCL,
 }
 
 megadepth_datasets = {
@@ -54,6 +59,7 @@ train_dataset_registry = {
 }
 train_dataset_registry.update(megadepth_datasets)
 
+# TODO: Run with overlap ratio set to 0.5 for validation and testing like the original repository
 test_dataset_registry = {
     "tum-mono": lambda data_root: TUMMonocularStereoPairs(data_root, "test", True, 0.3),
     "kitti-gray": lambda data_root: KITTIMonocularStereoPairs(data_root, "test", True, False, 0.3),
@@ -98,7 +104,15 @@ class IMIPLightning(pl.LightningModule):
             hparams.n_eval_samples
         )
 
-        self.network = model_registry[hparams.model](hparams.n_convolutions, hparams.channels_in, hparams.channels_out)
+        self.network = model_registry[hparams.model](
+            hparams.n_convolutions, hparams.channels_in + 1, hparams.channels_out
+        )
+
+        self.hessian = epipointnet.imips_pytorch.models.hessian.MaxScaleHessian(
+            max_octaves=3,
+            scales_per_octave=3,
+        )
+
         self._loss = loss_registry[hparams.loss]()
         self._lr = hparams.learning_rate
 
@@ -129,7 +143,7 @@ class IMIPLightning(pl.LightningModule):
         return parser
 
     def get_new_run_name(self):
-        return "sc-" + str(self.hparams.n_convolutions) + "_" + \
+        return "hess2-sc-" + str(self.hparams.n_convolutions) + "_" + \
                "ohnm-" + str(self.hparams.n_top_patches) + "_" + \
                self.hparams.model + "-model_" + \
                self.hparams.loss + "-loss_" + \
@@ -179,6 +193,23 @@ class IMIPLightning(pl.LightningModule):
     def forward(self, patch_batch: torch.Tensor, keepDim: bool):
         return self.network(patch_batch, keepDim)
 
+    def preprocess_input_image(self, image):
+        # normalize image and create hessian blobs
+        image = (image / 127.5) - 1.0  # scale to [-1, 1]
+
+        # convert to grayscale
+        image_gray = kornia.color.rgb_to_grayscale(image) if image.shape[0] == 3 else image
+
+        # contrast stretch image for hessian http://homepages.inf.ed.ac.uk/rbf/HIPR2/stretch.htm
+        image_gray_1p_idx = 1 + round(.02 * (image_gray.numel() - 1))
+        image_gray_99p_idx = 1 + round(.98 * (image_gray.numel() - 1))
+        image_gray_1p_val = image_gray.view(-1).kthvalue(image_gray_1p_idx).values
+        image_gray_99p_val = image_gray.view(-1).kthvalue(image_gray_99p_idx).values
+        image_gray = (image_gray - image_gray_1p_val) * (2.0 / (image_gray_99p_val - image_gray_1p_val)) - 1
+        image_gray.clamp_(-1, 1)
+        image_hessian = self.hessian(image_gray.unsqueeze(0))[0]
+        return torch.cat((image, image_hessian), dim=0)
+
     def training_step(self, batch, batch_idx, optimizer_idx):
         # set modules to training mode
         self.network.train(True)
@@ -192,6 +223,9 @@ class IMIPLightning(pl.LightningModule):
         img_2 = img_2[0]
         # name = name[0]
         correspondence_func = correspondence_func[0]
+
+        img_1 = self.preprocess_input_image(img_1)
+        img_2 = self.preprocess_input_image(img_2)
 
         if optimizer_idx == 0:  # train on image 1 of pair
             # Find top k keypoints in each image
@@ -334,6 +368,9 @@ class IMIPLightning(pl.LightningModule):
         # name = name[0]
         correspondence_func = correspondence_func[0]
 
+        img_1 = self.preprocess_input_image(img_1)
+        img_2 = self.preprocess_input_image(img_2)
+
         img_1_kp_candidates, _ = self.network.extract_top_k_keypoints(img_1, self._n_top_patches)
         img_2_kp_candidates, _ = self.network.extract_top_k_keypoints(img_2, self._n_top_patches)
 
@@ -378,6 +415,9 @@ class IMIPLightning(pl.LightningModule):
         img_2 = img_2[0]
         # name = name[0]
         correspondence_func = correspondence_func[0]
+
+        img_1 = self.preprocess_input_image(img_1)
+        img_2 = self.preprocess_input_image(img_2)
 
         img_1_kp_candidates, _ = self.network.extract_top_k_keypoints(img_1, self._n_top_patches)
         img_2_kp_candidates, _ = self.network.extract_top_k_keypoints(img_2, self._n_top_patches)
