@@ -7,8 +7,8 @@ import numpy as np
 import torch.utils.data
 import torchvision.datasets.utils as tv_data
 
-from epipointnet.data import planar
-from epipointnet.datasets import sequence
+from imipnet.data import planar
+from imipnet.datasets import sequence
 
 
 class HPatchesPair(planar.HomographyPair):

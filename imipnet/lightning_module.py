@@ -10,63 +10,76 @@ import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader
 
-import epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_bce
-import epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_classic
-import epipointnet.imips_pytorch.models.convnet
-import epipointnet.imips_pytorch.models.hess_conv
-import epipointnet.imips_pytorch.models.strided_conv
-from epipointnet.data.pairs import CorrespondencePair
-from epipointnet.datasets.colmap import COLMAPStereoPairs
-from epipointnet.datasets.kitti import KITTIMonocularStereoPairs
-from epipointnet.datasets.shuffle import ShuffledDataset
-from epipointnet.datasets.tum_mono import TUMMonocularStereoPairs
+import imipnet.losses.ohnm_outlier_balanced_bce
+import imipnet.losses.ohnm_outlier_balanced_classic
+import imipnet.models.convnet
+import imipnet.models.preprocess.center
+import imipnet.models.preprocess.harris
+import imipnet.models.preprocess.hessian
+import imipnet.models.preprocess.normalize
+import imipnet.models.preprocess.preprocess
+import imipnet.models.strided_conv
+from imipnet.data.pairs import CorrespondencePair
+from imipnet.datasets.colmap import COLMAPStereoPairs
+from imipnet.datasets.kitti import KITTIMonocularStereoPairs
+from imipnet.datasets.shuffle import ShuffledDataset
+from imipnet.datasets.tum_mono import TUMMonocularStereoPairs
+
+preprocess_registry = {
+    "harris": imipnet.models.preprocess.harris.PreprocessHarris,
+    "hessian": imipnet.models.preprocess.hessian.PreprocessHessian,
+    "normalize": imipnet.models.preprocess.normalize.PreprocessNormalize,
+    "center": imipnet.models.preprocess.center.PreprocessIMIPCenter,
+    "": imipnet.models.preprocess.preprocess.PreprocessIdentity
+}
 
 model_registry = {
-    "simple-conv": epipointnet.imips_pytorch.models.convnet.SimpleConv,
-    "hess-simple-conv": epipointnet.imips_pytorch.models.hess_conv.HessConv,
-    "strided-simple-conv": epipointnet.imips_pytorch.models.strided_conv.StridedConv,
+    "simple-conv": imipnet.models.convnet.SimpleConv,
+    "strided-simple-conv": imipnet.models.strided_conv.StridedConv,
 }
 
 loss_registry = {
-    "outlier-balanced-classic": epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_classic.OHNMClassicImipLoss,
-    "outlier-balanced-bce-bce-uml": epipointnet.imips_pytorch.losses.ohnm_outlier_balanced_bce.OHNMBCELoss
-}
-
-megadepth_datasets = {
-    "megadepth-eiffel-gray": lambda data_root: COLMAPStereoPairs(
-        data_root, os.path.join("MegaDepth_v1_SfM", "0000"), False),
-    "megadepth-eiffel-color": lambda data_root: COLMAPStereoPairs(
-        data_root, os.path.join("MegaDepth_v1_SfM", "0000"), True),
-    "megadepth-trafalgar-gray": lambda data_root: COLMAPStereoPairs(
-        data_root, os.path.join("MegaDepth_v1_SfM", "0001"), False),
-    "megadepth-trafalgar-color": lambda data_root: COLMAPStereoPairs(
-        data_root, os.path.join("MegaDepth_v1_SfM", "0001"), True),
-    "megadepth-big-ben-gray": lambda data_root: COLMAPStereoPairs(
-        data_root, os.path.join("MegaDepth_v1_SfM", "0002"), False),
-    "megadepth-big-ben-color": lambda data_root: COLMAPStereoPairs(
-        data_root, os.path.join("MegaDepth_v1_SfM", "0002"), True),
+    "outlier-balanced-classic": imipnet.losses.ohnm_outlier_balanced_classic.OHNMClassicImipLoss,
+    "outlier-balanced-bce-bce-uml": imipnet.losses.ohnm_outlier_balanced_bce.OHNMBCELoss
 }
 
 train_dataset_registry = {
     "tum-mono": lambda data_root: TUMMonocularStereoPairs(data_root, "train", True, 0.3),
     "kitti-gray": lambda data_root: KITTIMonocularStereoPairs(data_root, "train", True, False, 0.3),
     "kitti-color": lambda data_root: KITTIMonocularStereoPairs(data_root, "train", True, False, 0.3),
+    "megadepth-gray": lambda data_root: torch.utils.data.ConcatDataset((
+        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0035"), False),
+        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0036"), False),
+        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0039"), False),
+    )),
+    "megadepth-color": lambda data_root: torch.utils.data.ConcatDataset((
+        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0035"), True),
+        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0036"), True),
+        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0039"), True),
+    )),
 }
-train_dataset_registry.update(megadepth_datasets)
 
 test_dataset_registry = {
     "tum-mono": lambda data_root: TUMMonocularStereoPairs(data_root, "test", True, 0.3),
     "kitti-gray": lambda data_root: KITTIMonocularStereoPairs(data_root, "test", True, False, 0.3),
+    "kitti-gray-0.5": lambda data_root: KITTIMonocularStereoPairs(data_root, "test", True, False, 0.5),
     "kitti-color": lambda data_root: KITTIMonocularStereoPairs(data_root, "test", True, False, 0.3),
+    "megadepth-gray": lambda data_root: COLMAPStereoPairs(
+        data_root, os.path.join("MegaDepth-Pairs", "test", "0032"), False),
+    "megadepth-color": lambda data_root: COLMAPStereoPairs(
+        data_root, os.path.join("MegaDepth-Pairs", "test", "0032"), True)
 }
-test_dataset_registry.update(megadepth_datasets)
 
 validation_dataset_registry = {
     "tum-mono": lambda data_root: TUMMonocularStereoPairs(data_root, "validation", True, 0.3),
     "kitti-gray": lambda data_root: KITTIMonocularStereoPairs(data_root, "validation", True, False, 0.3),
+    "kitti-gray-0.5": lambda data_root: KITTIMonocularStereoPairs(data_root, "validation", True, False, 0.5),
     "kitti-color": lambda data_root: KITTIMonocularStereoPairs(data_root, "validation", True, False, 0.3),
+    "megadepth-gray": lambda data_root: COLMAPStereoPairs(
+        data_root, os.path.join("MegaDepth-Pairs", "validation", "0008"), False),
+    "megadepth-color": lambda data_root: COLMAPStereoPairs(
+        data_root, os.path.join("MegaDepth-Pairs", "validation", "0008"), True)
 }
-validation_dataset_registry.update(megadepth_datasets)
 
 
 class IMIPLightning(pl.LightningModule):
@@ -98,7 +111,10 @@ class IMIPLightning(pl.LightningModule):
             hparams.n_eval_samples
         )
 
-        self.network = model_registry[hparams.model](hparams.n_convolutions, hparams.channels_in, hparams.channels_out)
+        self.preprocess = preprocess_registry[hparams.preprocess]()
+        channels_in = self.preprocess.output_channels(hparams.channels_in)
+
+        self.network = model_registry[hparams.model](hparams.n_convolutions, channels_in, hparams.channels_out)
         self._loss = loss_registry[hparams.loss]()
         self._lr = hparams.learning_rate
 
@@ -118,6 +134,7 @@ class IMIPLightning(pl.LightningModule):
         parser.add_argument('--n_eval_samples', type=int, default=50)
         parser.add_argument('--n_convolutions', type=int, default=14)
         parser.add_argument('--model', choices=model_registry.keys(), default="simple-conv")
+        parser.add_argument('--preprocess', choices=preprocess_registry.keys(), default="")
         parser.add_argument('--channels_in', type=int, default=1)
         parser.add_argument('--channels_out', type=int, default=128)
         parser.add_argument('--loss', choices=loss_registry.keys(), default="outlier-balanced-classic")
@@ -129,7 +146,8 @@ class IMIPLightning(pl.LightningModule):
         return parser
 
     def get_new_run_name(self):
-        return "sc-" + str(self.hparams.n_convolutions) + "_" + \
+        preprocess_tag = self.hparams.preprocess + "-" if len(self.hparams.preprocess) > 0 else ""
+        return preprocess_tag + "sc-" + str(self.hparams.n_convolutions) + "_" + \
                "ohnm-" + str(self.hparams.n_top_patches) + "_" + \
                self.hparams.model + "-model_" + \
                self.hparams.loss + "-loss_" + \
@@ -192,6 +210,10 @@ class IMIPLightning(pl.LightningModule):
         img_2 = img_2[0]
         # name = name[0]
         correspondence_func = correspondence_func[0]
+
+        # preprocess images
+        img_1 = self.preprocess(img_1)
+        img_2 = self.preprocess(img_2)
 
         if optimizer_idx == 0:  # train on image 1 of pair
             # Find top k keypoints in each image
@@ -334,6 +356,10 @@ class IMIPLightning(pl.LightningModule):
         # name = name[0]
         correspondence_func = correspondence_func[0]
 
+        # preprocess images
+        img_1 = self.preprocess(img_1)
+        img_2 = self.preprocess(img_2)
+
         img_1_kp_candidates, _ = self.network.extract_top_k_keypoints(img_1, self._n_top_patches)
         img_2_kp_candidates, _ = self.network.extract_top_k_keypoints(img_2, self._n_top_patches)
 
@@ -378,6 +404,10 @@ class IMIPLightning(pl.LightningModule):
         img_2 = img_2[0]
         # name = name[0]
         correspondence_func = correspondence_func[0]
+
+        # preprocess images
+        img_1 = self.preprocess(img_1)
+        img_2 = self.preprocess(img_2)
 
         img_1_kp_candidates, _ = self.network.extract_top_k_keypoints(img_1, self._n_top_patches)
         img_2_kp_candidates, _ = self.network.extract_top_k_keypoints(img_2, self._n_top_patches)

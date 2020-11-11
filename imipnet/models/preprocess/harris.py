@@ -3,7 +3,37 @@ from typing import Optional
 import kornia
 import torch
 
-from . import pyramid
+from .preprocess import PreprocessModule
+from .pyramid import ScalePyramid
+
+
+class PreprocessHarris(PreprocessModule):
+    def __init__(self):
+        super(PreprocessModule, self).__init__()
+        self.harris = AvgScaleHarris(
+            max_octaves=2,
+            scales_per_octave=3,
+        )
+
+    def preprocess(self, image: torch.Tensor):
+        # normalize image and create harris corners
+        image = (image / 127.5) - 1.0  # scale to [-1, 1]
+
+        # convert to grayscale
+        image_gray = kornia.color.rgb_to_grayscale(image) if image.shape[0] == 3 else image
+
+        # contrast stretch image for harris http://homepages.inf.ed.ac.uk/rbf/HIPR2/stretch.htm
+        image_gray_1p_idx = 1 + round(.02 * (image_gray.numel() - 1))
+        image_gray_99p_idx = 1 + round(.98 * (image_gray.numel() - 1))
+        image_gray_1p_val = image_gray.view(-1).kthvalue(image_gray_1p_idx).values
+        image_gray_99p_val = image_gray.view(-1).kthvalue(image_gray_99p_idx).values
+        image_gray = (image_gray - image_gray_1p_val) * (2.0 / (image_gray_99p_val - image_gray_1p_val)) - 1
+        image_gray.clamp_(-1, 1)
+        image_harris = self.harris(image_gray.unsqueeze(0))[0]
+        return torch.cat((image, image_harris), dim=0)
+
+    def output_channels(self, input_channels: int) -> int:
+        return input_channels + 1
 
 
 class AvgScaleHarris(torch.nn.Module):
@@ -13,7 +43,7 @@ class AvgScaleHarris(torch.nn.Module):
                  ):
         super(AvgScaleHarris, self).__init__()
 
-        self.scale_pyramid = pyramid.ScalePyramid(
+        self.scale_pyramid = ScalePyramid(
             max_octaves=max_octaves,
             n_levels=scales_per_octave,
             init_sigma=1.6,

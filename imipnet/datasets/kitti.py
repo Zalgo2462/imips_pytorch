@@ -8,8 +8,8 @@ import numpy as np
 import torch.utils.data
 import torchvision.datasets.utils as tv_data
 
-from epipointnet.data import pairs, klt, calibrated
-from epipointnet.datasets import sequence
+from imipnet.data import pairs, klt, calibrated
+from imipnet.datasets import sequence
 
 
 class KITTIMonocularStereoPairsSequence(torch.utils.data.Dataset):

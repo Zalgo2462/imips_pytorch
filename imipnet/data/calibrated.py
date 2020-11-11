@@ -1,6 +1,6 @@
 import numpy as np
 
-from epipointnet.data.pairs import FundamentalMatrixPair
+from imipnet.data.pairs import FundamentalMatrixPair
 
 PINV_F_MAT_ALGORITHM = 0
 STD_STEREO_F_MAT_ALGORITHM = 1

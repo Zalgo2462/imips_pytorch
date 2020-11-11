@@ -2,7 +2,7 @@ from typing import Tuple
 
 import numpy as np
 
-from epipointnet.data.pairs import CorrespondencePair
+from imipnet.data.pairs import CorrespondencePair
 
 
 class AbsoluteFlowPair(CorrespondencePair):

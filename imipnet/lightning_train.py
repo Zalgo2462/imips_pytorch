@@ -5,11 +5,11 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from epipointnet.imips_pytorch.lightning_hessian_module import IMIPLightning
+from imipnet.lightning_module import IMIPLightning
 
 parser = ArgumentParser()
 parser = IMIPLightning.add_model_specific_args(parser)
-args = parser.parse_args(["--overfit_n", "50"])
+args = parser.parse_args([])
 
 imip_module = IMIPLightning(args)
 name = imip_module.get_new_run_name()

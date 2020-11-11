@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 from scipy.stats import special_ortho_group
 
-from epipointnet.data.calibrated import PinvFundamentalMatrixPair, StdStereoFundamentalMatrixPair
+from imipnet.data.calibrated import PinvFundamentalMatrixPair, StdStereoFundamentalMatrixPair
 
 
 class TestFundamentalMatrixPairs(unittest.TestCase):
