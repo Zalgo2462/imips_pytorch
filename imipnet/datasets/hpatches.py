@@ -73,6 +73,8 @@ class HPatchesPairGenerator:
         return len(self._pairs_order)
 
     def __getitem__(self: 'HPatchesPairGenerator', linear_index: int) -> HPatchesPair:
+        if linear_index >= len(self):
+            raise IndexError()
         two_dim_index = self._pairs_order[linear_index]
         image_1 = self.images[two_dim_index[0]]
         image_2 = self.images[two_dim_index[1]]
@@ -177,6 +179,8 @@ class HPatchesSequencesStereoPairs(torch.utils.data.Dataset):
         return self.pairs_per_sequence * len(self.sequences)
 
     def __getitem__(self: 'HPatchesSequencesStereoPairs', index: int) -> HPatchesPair:
+        if index >= len(self):
+            raise IndexError()
         return self.sequences[index // self.pairs_per_sequence][index % self.pairs_per_sequence]
 
     def download(self: 'HPatchesSequencesStereoPairs') -> None:

@@ -25,6 +25,8 @@ from imipnet.datasets.kitti import KITTIMonocularStereoPairs
 from imipnet.datasets.shuffle import ShuffledDataset
 from imipnet.datasets.tum_mono import TUMMonocularStereoPairs
 
+colmap_max_image_bytes = 1750000
+
 preprocess_registry = {
     "harris": imipnet.models.preprocess.harris.PreprocessHarris,
     "hessian": imipnet.models.preprocess.hessian.PreprocessHessian,
@@ -48,14 +50,20 @@ train_dataset_registry = {
     "kitti-gray": lambda data_root: KITTIMonocularStereoPairs(data_root, "train", True, False, 0.3),
     "kitti-color": lambda data_root: KITTIMonocularStereoPairs(data_root, "train", True, False, 0.3),
     "megadepth-gray": lambda data_root: torch.utils.data.ConcatDataset((
-        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0035"), False),
-        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0036"), False),
-        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0039"), False),
+        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0035"), False,
+                          max_image_bytes=colmap_max_image_bytes),
+        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0036"), False,
+                          max_image_bytes=colmap_max_image_bytes),
+        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0039"), False,
+                          max_image_bytes=colmap_max_image_bytes),
     )),
     "megadepth-color": lambda data_root: torch.utils.data.ConcatDataset((
-        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0035"), True),
-        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0036"), True),
-        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0039"), True),
+        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0035"), True,
+                          max_image_bytes=colmap_max_image_bytes),
+        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0036"), True,
+                          max_image_bytes=colmap_max_image_bytes),
+        COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0039"), True,
+                          max_image_bytes=colmap_max_image_bytes),
     )),
 }
 
@@ -65,9 +73,11 @@ test_dataset_registry = {
     "kitti-gray-0.5": lambda data_root: KITTIMonocularStereoPairs(data_root, "test", True, False, 0.5),
     "kitti-color": lambda data_root: KITTIMonocularStereoPairs(data_root, "test", True, False, 0.3),
     "megadepth-gray": lambda data_root: COLMAPStereoPairs(
-        data_root, os.path.join("MegaDepth-Pairs", "test", "0032"), False),
+        data_root, os.path.join("MegaDepth-Pairs", "test", "0032"), False,
+        max_image_bytes=colmap_max_image_bytes),
     "megadepth-color": lambda data_root: COLMAPStereoPairs(
-        data_root, os.path.join("MegaDepth-Pairs", "test", "0032"), True)
+        data_root, os.path.join("MegaDepth-Pairs", "test", "0032"), True,
+        max_image_bytes=colmap_max_image_bytes)
 }
 
 validation_dataset_registry = {
@@ -76,9 +86,11 @@ validation_dataset_registry = {
     "kitti-gray-0.5": lambda data_root: KITTIMonocularStereoPairs(data_root, "validation", True, False, 0.5),
     "kitti-color": lambda data_root: KITTIMonocularStereoPairs(data_root, "validation", True, False, 0.3),
     "megadepth-gray": lambda data_root: COLMAPStereoPairs(
-        data_root, os.path.join("MegaDepth-Pairs", "validation", "0008"), False),
+        data_root, os.path.join("MegaDepth-Pairs", "validation", "0008"), False,
+        max_image_bytes=colmap_max_image_bytes),
     "megadepth-color": lambda data_root: COLMAPStereoPairs(
-        data_root, os.path.join("MegaDepth-Pairs", "validation", "0008"), True)
+        data_root, os.path.join("MegaDepth-Pairs", "validation", "0008"), True,
+        max_image_bytes=colmap_max_image_bytes)
 }
 
 
@@ -202,18 +214,15 @@ class IMIPLightning(pl.LightningModule):
         self.network.train(True)
         self._loss.train(True)
 
-        # split out the batch data
-        img_1, img_2, name, correspondence_func = batch
+        # Run preprocess step and store the results for the next pass
+        batch[0] = torch.stack([self.preprocess(img) for img in batch[0]], dim=0)
+        batch[1] = torch.stack([self.preprocess(img) for img in batch[1]], dim=0)
 
         # unpack data since batch size is 1
-        img_1 = img_1[0]
-        img_2 = img_2[0]
-        # name = name[0]
-        correspondence_func = correspondence_func[0]
-
-        # preprocess images
-        img_1 = self.preprocess(img_1)
-        img_2 = self.preprocess(img_2)
+        img_1 = batch[0][0]
+        img_2 = batch[1][0]
+        # name = batch[2][0]
+        correspondence_func = batch[3][0]
 
         if optimizer_idx == 0:  # train on image 1 of pair
             # Find top k keypoints in each image
@@ -347,18 +356,15 @@ class IMIPLightning(pl.LightningModule):
         self.network.train(False)
         self._loss.train(False)
 
-        # split out the batch data
-        img_1, img_2, name, correspondence_func = batch
+        # Run preprocess step in place
+        batch[0] = torch.stack([self.preprocess(img) for img in batch[0]], dim=0)
+        batch[1] = torch.stack([self.preprocess(img) for img in batch[1]], dim=0)
 
         # unpack data since batch size is 1
-        img_1 = img_1[0]
-        img_2 = img_2[0]
-        # name = name[0]
-        correspondence_func = correspondence_func[0]
-
-        # preprocess images
-        img_1 = self.preprocess(img_1)
-        img_2 = self.preprocess(img_2)
+        img_1 = batch[0][0]
+        img_2 = batch[1][0]
+        # name = batch[2][0]
+        correspondence_func = batch[3][0]
 
         img_1_kp_candidates, _ = self.network.extract_top_k_keypoints(img_1, self._n_top_patches)
         img_2_kp_candidates, _ = self.network.extract_top_k_keypoints(img_2, self._n_top_patches)
@@ -396,18 +402,15 @@ class IMIPLightning(pl.LightningModule):
         self.network.train(False)
         self._loss.train(False)
 
-        # split out the batch data
-        img_1, img_2, name, correspondence_func = batch
+        # Run preprocess step in place
+        batch[0] = torch.stack([self.preprocess(img) for img in batch[0]], dim=0)
+        batch[1] = torch.stack([self.preprocess(img) for img in batch[1]], dim=0)
 
         # unpack data since batch size is 1
-        img_1 = img_1[0]
-        img_2 = img_2[0]
-        # name = name[0]
-        correspondence_func = correspondence_func[0]
-
-        # preprocess images
-        img_1 = self.preprocess(img_1)
-        img_2 = self.preprocess(img_2)
+        img_1 = batch[0][0]
+        img_2 = batch[1][0]
+        # name = batch[2][0]
+        correspondence_func = batch[3][0]
 
         img_1_kp_candidates, _ = self.network.extract_top_k_keypoints(img_1, self._n_top_patches)
         img_2_kp_candidates, _ = self.network.extract_top_k_keypoints(img_2, self._n_top_patches)

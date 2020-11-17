@@ -97,6 +97,10 @@ class Tracker:
         # j = i + 1.
         return i * n - (i * i + i) // 2
 
+    def prep_for_serialization(self):
+        # __detector cannot be pickled, so we have to free it before the Tracker can be serialized
+        self.__detector = None
+
     def _find_new_FAST_keypoints(self: 'Tracker', img: np.ndarray,
                                  existing_keypoints_rc: Optional[np.ndarray] = None) -> np.ndarray:
         if existing_keypoints_rc is None:

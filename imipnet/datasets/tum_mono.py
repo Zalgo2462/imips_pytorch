@@ -37,6 +37,8 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
         if download:
             self.download()
 
+        self._tracker.prep_for_serialization()
+
         if not self._check_processed_exists():
             raise RuntimeError('Dataset not found.' +
                                ' You can use download=True to download it')
@@ -75,7 +77,7 @@ class TUMMonocularStereoPairs(torch.utils.data.Dataset):
         return self._generator_len_cum_sum[-1]
 
     def __getitem__(self, index: int) -> pairs.CorrespondencePair:
-        if index > len(self):
+        if index >= len(self):
             raise IndexError()
 
         generator_index = bisect.bisect_right(self._generator_len_cum_sum, index)

@@ -71,6 +71,8 @@ class KITTIMonocularStereoPairsSequence(torch.utils.data.Dataset):
         if download:
             self.download()
 
+        self._tracker.prep_for_serialization()
+
         # load the camera calibration data
         with open(os.path.join(self._processed_sequence_folder, "calibration_data.pickle"),
                   'rb') as calib_data_file_obj:
@@ -110,7 +112,7 @@ class KITTIMonocularStereoPairsSequence(torch.utils.data.Dataset):
         return self._overlapped_frames_cum_sum[-1]
 
     def __getitem__(self, index: int) -> pairs.CorrespondenceFundamentalMatrixPair:
-        if index > len(self):
+        if index >= len(self):
             raise IndexError()
 
         img_1_index = bisect.bisect_right(self._overlapped_frames_cum_sum, index)

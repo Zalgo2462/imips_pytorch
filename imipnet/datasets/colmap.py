@@ -184,14 +184,22 @@ class COLMAPStereoPairs(torch.utils.data.Dataset):
 
     @property
     def _pair_index_path(self) -> str:
-        return os.path.join(self._project_folder, f"pair_ids_min_{self._minimum_SIFT_matches}_matches.bin")
+        pair_file = f"pair_ids_min_{self._minimum_SIFT_matches}_matches"
+        if self._max_image_bytes is not None:
+            color_tag = "color" if self._color else "gray"
+            pair_file += f"_max_{self._max_image_bytes}_{color_tag}_image_bytes"
+        pair_file += ".bin"
+
+        return os.path.join(self._project_folder, pair_file)
 
     def __init__(self, root: str, colmap_project_name: str, color: Optional[bool] = True,
-                 minimum_matches: Optional[int] = 1024, db_name: Optional[str] = "colmap.db"):
+                 minimum_matches: Optional[int] = 1024, db_name: Optional[str] = "colmap.db",
+                 max_image_bytes=None):
         self._root_folder = os.path.abspath(root)
         self._colmap_project = colmap_project_name
         self._db_name = db_name
         self._color = color
+        self._max_image_bytes = max_image_bytes
 
         self._cameras = colmap_read.read_cameras_binary(os.path.join(self._sparse_folder, "cameras.bin"))
         self._images = colmap_read.read_images_binary(os.path.join(self._sparse_folder, "images.bin"))
@@ -211,7 +219,7 @@ class COLMAPStereoPairs(torch.utils.data.Dataset):
         return self._num_pairs
 
     def __getitem__(self, i: int) -> pairs.CorrespondenceFundamentalMatrixPair:
-        if i > len(self):
+        if i >= len(self):
             raise IndexError()
 
         pair_id = COLMAPStereoPairs._get_pair_id(self._pairs_index_file, i)
@@ -283,8 +291,25 @@ class COLMAPStereoPairs(torch.utils.data.Dataset):
                 # Filter out the pair ids which we relate images not in the sparse data
                 image_1_id, image_2_id = COLMAPStereoPairs._pair_id_to_image_ids(pair_id)
                 try:
-                    _ = self._images[image_1_id]
-                    _ = self._images[image_2_id]
+                    image_1 = self._images[image_1_id]
+                    image_2 = self._images[image_2_id]
+
+                    image_1_bytes = cv2.imread(
+                        os.path.join(self._images_folder, image_1.name),
+                        cv2.IMREAD_COLOR if self._color else cv2.IMREAD_GRAYSCALE
+                    ).size
+
+                    if self._max_image_bytes is not None and image_1_bytes > self._max_image_bytes:
+                        continue
+
+                    image_2_bytes = cv2.imread(
+                        os.path.join(self._images_folder, image_2.name),
+                        cv2.IMREAD_COLOR if self._color else cv2.IMREAD_GRAYSCALE
+                    ).size
+
+                    if self._max_image_bytes is not None and image_2_bytes > self._max_image_bytes:
+                        continue
+
                 except KeyError:
                     continue
                 # Save pair id as uint32 to index file

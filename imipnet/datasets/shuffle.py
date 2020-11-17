@@ -13,5 +13,7 @@ class ShuffledDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self._index_order)
 
-    def __getitem__(self, item):
-        return self._dataset[self._index_order[item]]
+    def __getitem__(self, index):
+        if index >= len(self):
+            raise IndexError()
+        return self._dataset[self._index_order[index]]
