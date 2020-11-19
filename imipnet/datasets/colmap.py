@@ -207,22 +207,17 @@ class COLMAPStereoPairs(torch.utils.data.Dataset):
         if not self._check_index_exists():
             self._generate_flow_pair_index(minimum_matches)
 
-        self._pairs_index_file = open(self._pair_index_path, 'rb')
-        self._num_pairs = COLMAPStereoPairs._read_num_pairs_from_index(self._pairs_index_file)
-
-    def __del__(self):
-        if (hasattr(self, "_pairs_index_file") and self._pairs_index_file is not None and
-                not self._pairs_index_file.closed):
-            self._pairs_index_file.close()
+        with open(self._pair_index_path, 'rb') as pairs_index_file:
+            self._pairs_index = COLMAPStereoPairs._load_pairs_index(pairs_index_file)
 
     def __len__(self) -> int:
-        return self._num_pairs
+        return len(self._pairs_index)
 
     def __getitem__(self, i: int) -> pairs.CorrespondenceFundamentalMatrixPair:
         if i >= len(self):
             raise IndexError()
 
-        pair_id = COLMAPStereoPairs._get_pair_id(self._pairs_index_file, i)
+        pair_id = self._pairs_index[i]
         image_1_id, image_2_id = self._pair_id_to_image_ids(pair_id)
 
         image_1_data = self._images[image_1_id]
@@ -277,6 +272,7 @@ class COLMAPStereoPairs(torch.utils.data.Dataset):
 
     def _generate_flow_pair_index(self, minimum_matches: int):
         print("Generating pairs index for COLMAP dataset: {0}".format(self._database_path))
+
         with open(self._pair_index_path, 'wb') as index_file:
             index_file.write(struct.pack('Q', 0))  # Make space for writing total count of pair ids
 
@@ -322,14 +318,10 @@ class COLMAPStereoPairs(torch.utils.data.Dataset):
         print("Created pair index for COLMAP dataset with {0} pairs".format(num_pairs))
 
     @staticmethod
-    def _read_num_pairs_from_index(pairs_index_file: BinaryIO) -> int:
+    def _load_pairs_index(pairs_index_file: BinaryIO):
         pairs_index_file.seek(0)
-        return struct.unpack('Q', pairs_index_file.read(struct.calcsize('Q')))[0]
-
-    @staticmethod
-    def _get_pair_id(pairs_index_file: BinaryIO, i: int) -> int:
-        pairs_index_file.seek(struct.calcsize('Q') * (i + 1))
-        return struct.unpack('Q', pairs_index_file.read(struct.calcsize('Q')))[0]
+        num_pairs = struct.unpack('Q', pairs_index_file.read(struct.calcsize('Q')))[0]
+        return struct.unpack('Q' * num_pairs, pairs_index_file.read())
 
     @staticmethod
     def _pair_id_to_image_ids(pair_id):
