@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import struct
-from typing import Optional, Tuple, BinaryIO, Union
+from typing import Optional, Tuple, BinaryIO
 
 import cv2
 import numpy as np
@@ -12,155 +12,6 @@ from ..data import pairs, aflow, calibrated
 
 
 class COLMAPStereoPairs(torch.utils.data.Dataset):
-    class PairData:
-        def __init__(self, image_1_name: Union[str, np.array], image_2_name: Union[str, np.array],
-                     image_1_intrinsic: np.ndarray, image_1_extrinsic: np.ndarray,
-                     image_1_intrinsic_inv: np.ndarray, image_1_pose: np.ndarray,
-                     image_2_intrinsic: np.ndarray, image_2_extrinsic: np.ndarray,
-                     image_2_intrinsic_inv: np.ndarray, image_2_pose: np.ndarray,
-                     image_1_aflow: np.ndarray, image_2_aflow: np.ndarray
-                     ):
-            self.image_1_name = str(image_1_name)
-            self.image_2_name = str(image_2_name)
-            self.image_1_intrinsic = image_1_intrinsic
-            self.image_1_extrinsic = image_1_extrinsic
-            self.image_1_intrinsic_inv = image_1_intrinsic_inv
-            self.image_1_pose = image_1_pose
-            self.image_2_intrinsic = image_2_intrinsic
-            self.image_2_extrinsic = image_2_extrinsic
-            self.image_2_intrinsic_inv = image_2_intrinsic_inv
-            self.image_2_pose = image_2_pose
-            self.image_1_aflow = image_1_aflow
-            self.image_2_aflow = image_2_aflow
-
-        @staticmethod
-        def from_COLMAP_data(image_1: colmap_read.Image, image_2: colmap_read.Image,
-                             camera_1: colmap_read.Camera, camera_2: colmap_read.Camera,
-                             image_1_depth_map: np.ndarray,
-                             image_2_depth_map: np.ndarray) -> 'COLMAPStereoPairs.PairData':
-            image_1_intrinsic, image_1_extrinsic, image_1_shape = COLMAPStereoPairs.PairData._derive_camera_data(
-                camera_1, image_1
-            )
-            image_2_intrinsic, image_2_extrinsic, image_2_shape = COLMAPStereoPairs.PairData._derive_camera_data(
-                camera_2, image_2
-            )
-
-            # create projection and inverse projection ala
-            # https://github.com/colmap/colmap/blob/d3a29e203ab69e91eda938d6e56e1c7339d62a99/src/mvs/fusion.cc#L373
-
-            image_1_camera_matrix = image_1_intrinsic @ image_1_extrinsic[:3]
-            image_1_camera_matrix_inv = np.linalg.inv(np.block([[image_1_camera_matrix], [np.array([0, 0, 0, 1])]]))
-
-            image_2_camera_matrix = image_2_intrinsic @ image_2_extrinsic[:3]
-            image_2_camera_matrix_inv = np.linalg.inv(np.block([[image_2_camera_matrix], [np.array([0, 0, 0, 1])]]))
-
-            image_1_aflow = COLMAPStereoPairs.PairData._calculate_absolute_flow(
-                image_1_camera_matrix_inv, image_2_camera_matrix, image_1_depth_map, image_1_shape, image_2_shape
-            )
-
-            image_2_aflow = COLMAPStereoPairs.PairData._calculate_absolute_flow(
-                image_2_camera_matrix_inv, image_1_camera_matrix, image_2_depth_map, image_2_shape, image_1_shape
-            )
-
-            image_1_aflow, image_2_aflow = COLMAPStereoPairs.PairData._refine_pairwise_absolute_flow(
-                image_1_aflow, image_2_aflow
-            )
-
-            return COLMAPStereoPairs.PairData(image_1_name=image_1.name, image_2_name=image_2.name,
-                                              image_1_intrinsic=image_1_intrinsic, image_1_extrinsic=image_1_extrinsic,
-                                              image_1_intrinsic_inv=np.linalg.inv(image_1_intrinsic),
-                                              image_1_pose=np.linalg.inv(image_1_extrinsic),
-                                              image_2_intrinsic=image_2_intrinsic, image_2_extrinsic=image_2_extrinsic,
-                                              image_2_intrinsic_inv=np.linalg.inv(image_2_intrinsic),
-                                              image_2_pose=np.linalg.inv(image_2_extrinsic),
-                                              image_1_aflow=image_1_aflow, image_2_aflow=image_2_aflow)
-
-        @staticmethod
-        def _calculate_absolute_flow(image_1_camera_matrix_inv: np.ndarray, image_2_camera_matrix: np.ndarray,
-                                     image_1_depth_map: np.ndarray, image_1_shape: Tuple[int, int],
-                                     image_2_shape: Tuple[int, int]) -> np.ndarray:
-            # camera_inv @ [col * depth, row * depth, depth, 1].T
-            x, y = np.meshgrid(np.arange(image_1_shape[1], dtype=np.float32),
-                               np.arange(image_1_shape[0], dtype=np.float32))
-            ones = np.ones_like(x)
-            xy = np.stack((x, y, ones, ones), axis=0)
-            xy[:3, :, :] = xy[:3, :, :] * np.expand_dims(image_1_depth_map, axis=0)
-
-            abs_flow = (image_2_camera_matrix @ (image_1_camera_matrix_inv @ xy.reshape(4, -1)))
-            abs_flow = abs_flow[0:2] / abs_flow[2:3]
-
-            with np.errstate(invalid='ignore'):  # silence warnings stemming from nan comparisons
-                bad_flow = ((abs_flow[0, :] < 0) | (abs_flow[1, :] < 0) |
-                            (abs_flow[0, :] >= image_2_shape[1]) | (abs_flow[1, :] >= image_2_shape[0]))
-
-            bad_flow = np.stack((bad_flow, bad_flow), axis=0)
-            abs_flow[bad_flow] = float('nan')
-
-            abs_flow = abs_flow.reshape(2, image_1_shape[0], image_1_shape[1])
-            return abs_flow.astype(np.float32)
-
-        @staticmethod
-        def _refine_pairwise_absolute_flow(image_1_abs_flow: np.ndarray, image_2_abs_flow: np.ndarray):
-            image_1_flow_shape = image_1_abs_flow.shape
-            image_2_flow_shape = image_2_abs_flow.shape
-
-            # shift to a linear perspective to make the indexing easier
-            image_1_flow_linear = image_1_abs_flow.reshape(2, -1)
-            image_2_flow_linear = image_2_abs_flow.reshape(2, -1)
-
-            # remove the nans, but keep the index so we can remake the flow
-            image_1_non_nan_index = np.arange(image_1_flow_linear.shape[1])[~np.isnan(image_1_flow_linear[0])]
-            image_1_flow_filtered = image_1_flow_linear[:, image_1_non_nan_index]
-
-            image_2_non_nan_index = np.arange(image_2_flow_linear.shape[1])[~np.isnan(image_2_flow_linear[0])]
-            image_2_flow_filtered = image_2_flow_linear[:, image_2_non_nan_index]
-
-            # round accounting for border pixels
-            image_1_flow_filtered = np.round(image_1_flow_filtered).astype(np.int)
-            image_1_flow_filtered[0, image_1_flow_filtered[0] == image_2_flow_shape[2]] -= 1
-            image_1_flow_filtered[1, image_1_flow_filtered[1] == image_2_flow_shape[1]] -= 1
-
-            image_2_flow_filtered = np.round(image_2_flow_filtered).astype(np.int)
-            image_2_flow_filtered[0, image_2_flow_filtered[0] == image_1_flow_shape[2]] -= 1
-            image_2_flow_filtered[1, image_2_flow_filtered[1] == image_1_flow_shape[1]] -= 1
-
-            # check if indexing the other flow field with the first field results in a nan flow
-            image_1_bad_reverse_flow = np.isnan(
-                image_2_abs_flow[0, image_1_flow_filtered[1], image_1_flow_filtered[0]]
-            )
-            image_1_flow_linear[:, image_1_non_nan_index[image_1_bad_reverse_flow]] = float('nan')
-
-            image_2_bad_reverse_flow = np.isnan(
-                image_1_abs_flow[0, image_2_flow_filtered[1], image_2_flow_filtered[0]]
-            )
-            image_2_flow_linear[:, image_2_non_nan_index[image_2_bad_reverse_flow]] = float('nan')
-
-            image_1_abs_flow = image_1_flow_linear.reshape(image_1_flow_shape)
-            image_2_abs_flow = image_2_flow_linear.reshape(image_2_flow_shape)
-
-            return image_1_abs_flow, image_2_abs_flow
-
-        @staticmethod
-        def _derive_camera_data(camera: colmap_read.Camera, image: colmap_read.Image) -> \
-                Tuple[np.ndarray, np.ndarray, Tuple[int, int]]:
-            # returns intrinsic matrix, extrinsic matrix and image shape
-            intrinsic_matrix = np.eye(3)
-            intrinsic_matrix[0, 0] = camera.params[0]
-            intrinsic_matrix[1, 1] = camera.params[1]
-            intrinsic_matrix[0, 2] = camera.params[2]
-            intrinsic_matrix[1, 2] = camera.params[3]
-
-            extrinsic_matrix = np.eye(4)
-            extrinsic_matrix[:3, :3] = image.qvec2rotmat()
-            extrinsic_matrix[:3, 3] = image.tvec
-            return intrinsic_matrix, extrinsic_matrix, (camera.height, camera.width)
-
-        def save(self, file: BinaryIO):
-            np.savez_compressed(file, **self.__dict__)
-
-        @staticmethod
-        def load(file: BinaryIO):
-            return COLMAPStereoPairs.PairData(**dict(np.load(file).items()))
 
     @property
     def _project_folder(self) -> str:
@@ -220,34 +71,40 @@ class COLMAPStereoPairs(torch.utils.data.Dataset):
         pair_id = self._pairs_index[i]
         image_1_id, image_2_id = self._pair_id_to_image_ids(pair_id)
 
+        # load image 1 calibration
         image_1_data = self._images[image_1_id]
         camera_1_data = self._cameras[image_1_data.camera_id]
+        image_1_intrinsic, image_1_extrinsic, image_1_shape = COLMAPStereoPairs._derive_camera_data(
+            camera_1_data, image_1_data
+        )
+        image_1_camera_matrix = image_1_intrinsic @ image_1_extrinsic[:3]
+
+        # load image 1 depth map
         image_1_depth_map_path = os.path.join(self._depth_maps_folder, image_1_data.name + ".geometric.bin")
         image_1_depth_map = colmap_read.read_depth_map(image_1_depth_map_path)
-        image_1_depth_map[image_1_depth_map == 0] = float('nan')
+        image_1_depth_map[image_1_depth_map == 0] = float('nan')  # convert missing marker to NaN
 
+        # load image 2 calibration
         image_2_data = self._images[image_2_id]
         camera_2_data = self._cameras[image_2_data.camera_id]
+        image_2_intrinsic, image_2_extrinsic, image_2_shape = COLMAPStereoPairs._derive_camera_data(
+            camera_2_data, image_2_data,
+        )
+        image_2_camera_matrix = image_2_intrinsic @ image_2_extrinsic[:3]
+
+        # load image 2 depth map
         image_2_depth_map_path = os.path.join(self._depth_maps_folder, image_2_data.name + ".geometric.bin")
         image_2_depth_map = colmap_read.read_depth_map(image_2_depth_map_path)
         image_2_depth_map[image_2_depth_map == 0] = float('nan')
 
-        # the ids match the data in the database
-        # the image and camera data is properly loaded
-
-        pair_data = COLMAPStereoPairs.PairData.from_COLMAP_data(
-            image_1_data, image_2_data,
-            camera_1_data, camera_2_data,
-            image_1_depth_map, image_2_depth_map
-        )
-
+        # load the actual images
         image_1 = cv2.imread(
-            os.path.join(self._images_folder, pair_data.image_1_name),
+            os.path.join(self._images_folder, image_1_data.name),
             cv2.IMREAD_COLOR if self._color else cv2.IMREAD_GRAYSCALE
         )
 
         image_2 = cv2.imread(
-            os.path.join(self._images_folder, pair_data.image_2_name),
+            os.path.join(self._images_folder, image_2_data.name),
             cv2.IMREAD_COLOR if self._color else cv2.IMREAD_GRAYSCALE
         )
 
@@ -255,17 +112,21 @@ class COLMAPStereoPairs(torch.utils.data.Dataset):
             image_1 = cv2.cvtColor(image_1, cv2.COLOR_BGR2RGB)
             image_2 = cv2.cvtColor(image_2, cv2.COLOR_BGR2RGB)
 
-        pair_name = "COLMAP {0}: {1} {2}".format(self._colmap_project, pair_data.image_1_name, pair_data.image_2_name)
+        # give the current pair a name
+        pair_name = "COLMAP {0}: {1} {2}".format(self._colmap_project, image_1_data.name, image_2_data.name)
 
-        absolute_flow_pair = aflow.AbsoluteFlowPair(image_1, image_2, pair_name,
-                                                    pair_data.image_1_aflow, pair_data.image_2_aflow)
-
+        # construct an absolute flow pair from camera matrices and depth maps
+        absolute_flow_pair = aflow.CalibratedDepthPair(
+            image_1, image_2, pair_name,
+            image_1_camera_matrix, image_2_camera_matrix,
+            image_1_depth_map, image_2_depth_map,
+        )
         f_pair = calibrated.StdStereoFundamentalMatrixPair(
             image_1, image_2, pair_name,
-            pair_data.image_1_intrinsic, pair_data.image_2_intrinsic,
-            pair_data.image_1_intrinsic_inv, pair_data.image_2_intrinsic_inv,
-            pair_data.image_1_extrinsic[:3], pair_data.image_2_extrinsic[:3],
-            pair_data.image_1_pose[:3], pair_data.image_2_pose[:3]
+            image_1_intrinsic, image_2_intrinsic,
+            np.linalg.inv(image_1_intrinsic), np.linalg.inv(image_2_intrinsic),
+            image_1_extrinsic[:3], image_2_extrinsic[:3],
+            np.linalg.inv(image_1_extrinsic)[:3], np.linalg.inv(image_2_extrinsic)[:3]
         )
 
         return pairs.CorrespondenceFundamentalMatrixPair(absolute_flow_pair, f_pair)
@@ -316,6 +177,21 @@ class COLMAPStereoPairs(torch.utils.data.Dataset):
             connection.close()
 
         print("Created pair index for COLMAP dataset with {0} pairs".format(num_pairs))
+
+    @staticmethod
+    def _derive_camera_data(camera: colmap_read.Camera, image: colmap_read.Image) -> \
+            Tuple[np.ndarray, np.ndarray, Tuple[int, int]]:
+        # returns intrinsic matrix, extrinsic matrix and image shape
+        intrinsic_matrix = np.eye(3)
+        intrinsic_matrix[0, 0] = camera.params[0]
+        intrinsic_matrix[1, 1] = camera.params[1]
+        intrinsic_matrix[0, 2] = camera.params[2]
+        intrinsic_matrix[1, 2] = camera.params[3]
+
+        extrinsic_matrix = np.eye(4)
+        extrinsic_matrix[:3, :3] = image.qvec2rotmat()
+        extrinsic_matrix[:3, 3] = image.tvec
+        return intrinsic_matrix, extrinsic_matrix, (camera.height, camera.width)
 
     @staticmethod
     def _load_pairs_index(pairs_index_file: BinaryIO):

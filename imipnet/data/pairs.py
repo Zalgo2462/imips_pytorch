@@ -85,6 +85,33 @@ class CorrespondencePair(ImagePair, ABC):
         correspondence_funcs = [pair.correspondences for pair in pairs]
         return image_1_tensors, image_2_tensors, names, correspondence_funcs
 
+    def draw_gridded_matches(self, steps_per_axis: int = 10) -> Tuple[np.ndarray, np.ndarray]:
+        steps = np.linspace(0, 1, steps_per_axis)
+        steps_x_1 = self.image_1.shape[1] * steps
+        steps_y_1 = self.image_1.shape[0] * steps
+        anchors_1 = np.stack(np.meshgrid(steps_x_1, steps_y_1), axis=0).reshape(2, -1)
+        corrs_1, corrs_ind_1 = self.correspondences(anchors_1, inverse=False)
+        anchors_1 = anchors_1[:, corrs_ind_1]
+
+        anchor_keypoints_1 = [cv2.KeyPoint(anchors_1[0][i], anchors_1[1][i], 1) for i in range(anchors_1.shape[1])]
+        corr_keypoints_1 = [cv2.KeyPoint(corrs_1[0][i], corrs_1[1][i], 1) for i in range(corrs_1.shape[1])]
+        matches_1 = [cv2.DMatch(i, i, 0.0) for i in range(len(anchor_keypoints_1))]
+
+        match_img_1 = cv2.drawMatches(self.image_1, anchor_keypoints_1, self.image_2, corr_keypoints_1, matches_1, None)
+
+        steps_x_2 = self.image_2.shape[1] * steps
+        steps_y_2 = self.image_2.shape[0] * steps
+        anchors_2 = np.stack(np.meshgrid(steps_x_2, steps_y_2), axis=0).reshape(2, -1)
+        corrs_2, corrs_ind_2 = self.correspondences(anchors_2, inverse=True)
+        anchors_2 = anchors_2[:, corrs_ind_2]
+
+        anchor_keypoints_2 = [cv2.KeyPoint(anchors_2[0][i], anchors_2[1][i], 1) for i in range(anchors_2.shape[1])]
+        corr_keypoints_2 = [cv2.KeyPoint(corrs_2[0][i], corrs_2[1][i], 1) for i in range(corrs_2.shape[1])]
+        matches_2 = [cv2.DMatch(i, i, 0.0) for i in range(len(anchor_keypoints_2))]
+
+        match_img_2 = cv2.drawMatches(self.image_1, corr_keypoints_2, self.image_2, anchor_keypoints_2, matches_2, None)
+        return match_img_1, match_img_2
+
 
 class FundamentalMatrixPair(ImagePair, ABC):
 
@@ -153,8 +180,9 @@ class FundamentalMatrixPair(ImagePair, ABC):
         virt_pts = [pair.generate_virtual_points() for pair in pairs]
         pts_1_virt = [torch.tensor(virt_pt[0], dtype=torch.float32) for virt_pt in virt_pts]
         pts_2_virt = [torch.tensor(virt_pt[1], dtype=torch.float32) for virt_pt in virt_pts]
-        return image_1_tensors, image_2_tensors, names, torch.stack(f_mats_forward), torch.stack(f_mats_backward), \
-               torch.stack(pts_1_virt), torch.stack(pts_2_virt)
+        return (image_1_tensors, image_2_tensors, names,
+                torch.stack(f_mats_forward), torch.stack(f_mats_backward),
+                torch.stack(pts_1_virt), torch.stack(pts_2_virt))
 
 
 class CorrespondenceFundamentalMatrixPair(CorrespondencePair, FundamentalMatrixPair):
@@ -189,6 +217,7 @@ class CorrespondenceFundamentalMatrixPair(CorrespondencePair, FundamentalMatrixP
     def name(self) -> str:
         return self._f_pair.name
 
+    @staticmethod
     def collate_for_torch(pairs: List['CorrespondenceFundamentalMatrixPair']):
         image_1_tensors, image_2_tensors, names = ImagePair.collate_for_torch(pairs)
         # Batch up the correspondence functions for each pair, this likely closes over the
@@ -200,6 +229,6 @@ class CorrespondenceFundamentalMatrixPair(CorrespondencePair, FundamentalMatrixP
         virt_pts = [pair.generate_virtual_points() for pair in pairs]
         pts_1_virt = [torch.tensor(virt_pt[0], dtype=torch.float32) for virt_pt in virt_pts]
         pts_2_virt = [torch.tensor(virt_pt[1], dtype=torch.float32) for virt_pt in virt_pts]
-        return image_1_tensors, image_2_tensors, correspondence_funcs, names, \
-               torch.stack(f_mats_forward), torch.stack(f_mats_backward), \
-               torch.stack(pts_1_virt), torch.stack(pts_2_virt)
+        return (image_1_tensors, image_2_tensors, correspondence_funcs, names,
+                torch.stack(f_mats_forward), torch.stack(f_mats_backward),
+                torch.stack(pts_1_virt), torch.stack(pts_2_virt))
