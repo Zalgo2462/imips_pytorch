@@ -43,10 +43,10 @@ class COLMAPStereoPairs(torch.utils.data.Dataset):
 
         return os.path.join(self._project_folder, pair_file)
 
-    def __init__(self, root: str, colmap_project_name: str, color: Optional[bool] = True,
+    def __init__(self, data_root: str, colmap_project_name: str, color: Optional[bool] = True,
                  minimum_matches: Optional[int] = 1024, db_name: Optional[str] = "colmap.db",
                  max_image_bytes=None):
-        self._root_folder = os.path.abspath(root)
+        self._root_folder = os.path.abspath(data_root)
         self._colmap_project = colmap_project_name
         self._db_name = db_name
         self._color = color

@@ -20,6 +20,7 @@ import imipnet.models.preprocess.normalize
 import imipnet.models.preprocess.preprocess
 import imipnet.models.strided_conv
 from imipnet.data.pairs import CorrespondencePair
+from imipnet.datasets.blender import BlenderStereoPairs
 from imipnet.datasets.colmap import COLMAPStereoPairs
 from imipnet.datasets.kitti import KITTIMonocularStereoPairs
 from imipnet.datasets.shuffle import ShuffledDataset
@@ -65,6 +66,8 @@ train_dataset_registry = {
         COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0039"), True,
                           max_image_bytes=colmap_max_image_bytes),
     )),
+    "blender-livingroom-color": lambda data_root: BlenderStereoPairs(data_root, "livingroom_1", True),
+    "blender-livingroom-gray": lambda data_root: BlenderStereoPairs(data_root, "livingroom_1", False),
 }
 
 test_dataset_registry = {
