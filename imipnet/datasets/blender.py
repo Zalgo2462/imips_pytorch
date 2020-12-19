@@ -1,9 +1,11 @@
 import os
+import tarfile
 from typing import Optional
 
 import cv2
 import numpy as np
 import torch.utils.data
+import torchvision.datasets.utils as tv_data
 
 from imipnet.data.aflow import CalibratedDepthPair
 from imipnet.data.calibrated import StdStereoFundamentalMatrixPair
@@ -12,6 +14,11 @@ from .blender_pairs_read import read_pairs_index
 
 
 class BlenderStereoPairs(torch.utils.data.Dataset):
+    dataset_name_url_map = {
+        "livingroom_1": "https://github.com/Zalgo2462/BlenderStereoPairs/releases/download/v0.0.1/livingroom_1.tgz",
+        "livingroom_2": "https://github.com/Zalgo2462/BlenderStereoPairs/releases/download/v0.0.1/livingroom_2.tgz",
+        "livingroom_3": "https://github.com/Zalgo2462/BlenderStereoPairs/releases/download/v0.0.1/livingroom_3.tgz"
+    }
 
     @property
     def _project_folder(self) -> str:
@@ -21,10 +28,14 @@ class BlenderStereoPairs(torch.utils.data.Dataset):
     def _pairs_index_path(self) -> str:
         return os.path.join(self._project_folder, "pairs.csv")
 
-    def __init__(self, data_root: str, dataset_name: str, color: Optional[bool] = True):
+    def __init__(self, data_root: str, dataset_name: str, download: Optional[bool] = True,
+                 color: Optional[bool] = True):
         self._root_folder = os.path.abspath(data_root)
         self._dataset_name = dataset_name
         self._color = color
+
+        if download:
+            self.download()
 
         with open(self._pairs_index_path, 'r') as pair_index_fd:
             self._pairs_index = read_pairs_index(pair_index_fd)
@@ -95,13 +106,29 @@ class BlenderStereoPairs(torch.utils.data.Dataset):
 
         return CorrespondenceFundamentalMatrixPair(absolute_flow_pair, f_pair)
 
+    def download(self):
+        if os.path.exists(self._project_folder):
+            return
+
+        url = self.dataset_name_url_map[self._dataset_name]
+        target_dir = os.path.join(self._root_folder, self.__class__.__name__)
+        file_name = os.path.basename(url)
+        archive_file = os.path.join(target_dir, file_name)
+        tv_data.download_url(url, target_dir, file_name)
+        with tarfile.open(archive_file, 'r:gz') as tar:
+            tar.extractall(path=target_dir)
+        os.remove(archive_file)
+
+        return os.path.exists(self._project_folder)
+
+    """
     @staticmethod
     def _rectify_blender_depth_map(depth: np.ndarray, f_u: float, f_v: float) -> np.ndarray:
         x_axis = (np.arange(0, depth.shape[1]) + 0.5) / depth.shape[1] - 0.5  # need to test flipping subtraction
         y_axis = (np.arange(0, depth.shape[0]) + 0.5) / depth.shape[0] - 0.5
 
-        x_axis *= depth.shape[1] / f_u  # Equiv. tx. using blender details: x_axis *= sensor_width / lens_size
-        y_axis *= depth.shape[0] / f_v  # Equiv. tx. using blender details: y_axis *= sensor_height / lens_size
+        x_axis *= depth.shape[1] / f_u  # Equiv. using blender details: x_axis *= sensor_width / lens_size
+        y_axis *= depth.shape[0] / f_v  # Equiv. using blender details: y_axis *= sensor_height / lens_size
 
         x_chan, y_chan = np.meshgrid(x_axis, y_axis)
         z_chan = np.ones_like(x_chan)
@@ -109,3 +136,4 @@ class BlenderStereoPairs(torch.utils.data.Dataset):
         xyz /= np.linalg.norm(xyz, ord=2, axis=0)
         depth = xyz[2] * depth
         return depth
+    """

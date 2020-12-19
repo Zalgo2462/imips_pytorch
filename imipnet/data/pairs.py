@@ -86,7 +86,7 @@ class CorrespondencePair(ImagePair, ABC):
         return image_1_tensors, image_2_tensors, names, correspondence_funcs
 
     def draw_gridded_matches(self, steps_per_axis: int = 10) -> Tuple[np.ndarray, np.ndarray]:
-        steps = np.linspace(0, 1, steps_per_axis)
+        steps = np.linspace(0, 1, steps_per_axis)[:-1]
         steps_x_1 = self.image_1.shape[1] * steps
         steps_y_1 = self.image_1.shape[0] * steps
         anchors_1 = np.stack(np.meshgrid(steps_x_1, steps_y_1), axis=0).reshape(2, -1)

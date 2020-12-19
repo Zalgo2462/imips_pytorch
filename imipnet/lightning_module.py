@@ -10,6 +10,7 @@ import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader
 
+import imipnet.losses.ohnm_1_classic
 import imipnet.losses.ohnm_outlier_balanced_bce
 import imipnet.losses.ohnm_outlier_balanced_classic
 import imipnet.models.convnet
@@ -42,6 +43,7 @@ model_registry = {
 }
 
 loss_registry = {
+    "1-maxima-patch-classic": imipnet.losses.ohnm_1_classic.OHNM1ClassicImipLoss,
     "outlier-balanced-classic": imipnet.losses.ohnm_outlier_balanced_classic.OHNMClassicImipLoss,
     "outlier-balanced-bce-bce-uml": imipnet.losses.ohnm_outlier_balanced_bce.OHNMBCELoss
 }
@@ -66,8 +68,8 @@ train_dataset_registry = {
         COLMAPStereoPairs(data_root, os.path.join("MegaDepth-Pairs", "train", "0039"), True,
                           max_image_bytes=colmap_max_image_bytes),
     )),
-    "blender-livingroom-color": lambda data_root: BlenderStereoPairs(data_root, "livingroom_1", True),
-    "blender-livingroom-gray": lambda data_root: BlenderStereoPairs(data_root, "livingroom_1", False),
+    "blender-livingroom-color": lambda data_root: BlenderStereoPairs(data_root, "livingroom_1", True, True),
+    "blender-livingroom-gray": lambda data_root: BlenderStereoPairs(data_root, "livingroom_1", True, False),
 }
 
 test_dataset_registry = {
@@ -80,7 +82,9 @@ test_dataset_registry = {
         max_image_bytes=colmap_max_image_bytes),
     "megadepth-color": lambda data_root: COLMAPStereoPairs(
         data_root, os.path.join("MegaDepth-Pairs", "test", "0032"), True,
-        max_image_bytes=colmap_max_image_bytes)
+        max_image_bytes=colmap_max_image_bytes),
+    "blender-livingroom-color": lambda data_root: BlenderStereoPairs(data_root, "livingroom_3", True, True),
+    "blender-livingroom-gray": lambda data_root: BlenderStereoPairs(data_root, "livingroom_3", True, False),
 }
 
 validation_dataset_registry = {
@@ -93,7 +97,9 @@ validation_dataset_registry = {
         max_image_bytes=colmap_max_image_bytes),
     "megadepth-color": lambda data_root: COLMAPStereoPairs(
         data_root, os.path.join("MegaDepth-Pairs", "validation", "0008"), True,
-        max_image_bytes=colmap_max_image_bytes)
+        max_image_bytes=colmap_max_image_bytes),
+    "blender-livingroom-color": lambda data_root: BlenderStereoPairs(data_root, "livingroom_2", True, True),
+    "blender-livingroom-gray": lambda data_root: BlenderStereoPairs(data_root, "livingroom_2", True, False),
 }
 
 
@@ -203,7 +209,7 @@ class IMIPLightning(pl.LightningModule):
 
     def test_dataloader(self):
         return DataLoader(
-            self.train_set, batch_size=1, collate_fn=CorrespondencePair.collate_for_torch,
+            self.test_set, batch_size=1, collate_fn=CorrespondencePair.collate_for_torch,
             num_workers=1 + multiprocessing.cpu_count() // 2,
             shuffle=False,
             pin_memory=True
