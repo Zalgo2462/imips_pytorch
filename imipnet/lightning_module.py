@@ -453,7 +453,7 @@ class IMIPLightning(pl.LightningModule):
                 "apparent": torch.sort(
                     torch.stack([x['apparent inliers'] for x in outputs])).values / self.hparams.channels_out,
                 "true": torch.sort(
-                    torch.stack([x['apparent inliers'] for x in outputs])).values / self.hparams.channels_out,
+                    torch.stack([x['true inliers'] for x in outputs])).values / self.hparams.channels_out,
             }
         }
 
