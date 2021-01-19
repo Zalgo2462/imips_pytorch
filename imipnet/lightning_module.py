@@ -1,7 +1,7 @@
 import multiprocessing
 import os.path
 import socket
-from argparse import ArgumentParser
+from argparse import ArgumentParser, Namespace
 from datetime import datetime
 from typing import Tuple, List, Dict
 
@@ -106,6 +106,10 @@ validation_dataset_registry = {
 class IMIPLightning(pl.LightningModule):
 
     def __init__(self, hparams):
+
+        if isinstance(hparams, dict):  # when loading chkpts, pytorch-lightning is restoring hparams as an dict
+            hparams = Namespace(**hparams)
+
         super(IMIPLightning, self).__init__()
         self.save_hyperparameters(hparams)
 
@@ -166,13 +170,16 @@ class IMIPLightning(pl.LightningModule):
         parser.add_argument('--overfit_n', type=int, default=0)
         return parser
 
-    def get_new_run_name(self):
+    def get_name(self):
         preprocess_tag = self.hparams.preprocess + "-" if len(self.hparams.preprocess) > 0 else ""
         return preprocess_tag + "sc-" + str(self.hparams.n_convolutions) + "_" + \
                "ohnm-" + str(self.hparams.n_top_patches) + "_" + \
                self.hparams.model + "-model_" + \
                self.hparams.loss + "-loss_" + \
-               "train-" + self.hparams.train_set + "_" + \
+               "train-" + self.hparams.train_set
+
+    def get_new_run_name(self):
+        return self.get_name() + "_" + \
                (("overfit-" + str(self.hparams.overfit_n) + "_") if self.hparams.overfit_n > 0 else "") + \
                "eval-" + self.hparams.eval_set + "_" + \
                datetime.now().strftime('%b%d_%H-%M-%S') + '_' + socket.gethostname()
@@ -441,6 +448,12 @@ class IMIPLightning(pl.LightningModule):
                 "test/true inliers": torch.stack([x["true inliers"] for x in outputs]).mean(),
                 "test/apparent inliers (top k)": torch.stack(
                     [x["apparent inliers (top k)"] for x in outputs]).mean()
+            },
+            "matching_scores": {
+                "apparent": torch.sort(
+                    torch.stack([x['apparent inliers'] for x in outputs])).values / self.hparams.channels_out,
+                "true": torch.sort(
+                    torch.stack([x['apparent inliers'] for x in outputs])).values / self.hparams.channels_out,
             }
         }
 

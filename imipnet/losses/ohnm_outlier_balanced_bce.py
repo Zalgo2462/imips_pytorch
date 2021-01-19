@@ -10,9 +10,9 @@ class OHNMBCELoss(ImipLoss):
     def __init__(self, epsilon: float = 1e-4):
         super(OHNMBCELoss, self).__init__()
         self._epsilon = torch.nn.Parameter(torch.tensor([epsilon]), requires_grad=False)
-        self._bce_maxima_outlier_weights = torch.nn.ParameterDict({
-            str(1): torch.nn.Parameter(torch.tensor(1.0, dtype=torch.float32), requires_grad=False)
-        })
+        self._bce_maxima_outlier_weights = {
+            str(1): torch.tensor(1.0, dtype=torch.float32, requires_grad=False),
+        }
 
     @property
     def needs_correspondence_outputs(self) -> bool:
@@ -31,10 +31,9 @@ class OHNMBCELoss(ImipLoss):
         if nppc_str not in self._bce_maxima_outlier_weights:
             curr_device = self._bce_maxima_outlier_weights[str(1)].device
             curr_dtype = self._bce_maxima_outlier_weights[str(1)].dtype
-            k = torch.tensor(num_patches_per_channel, device=curr_device, dtype=curr_dtype)
-            self._bce_maxima_outlier_weights[nppc_str] = torch.nn.Parameter(
-                k * torch.log(k - 1) - torch.log((k - 1) / k) - k * torch.log(k) + 1,
-                requires_grad=False
+            k = torch.tensor(num_patches_per_channel, device=curr_device, dtype=curr_dtype, requires_grad=False)
+            self._bce_maxima_outlier_weights[nppc_str] = (
+                    k * torch.log(k - 1) - torch.log((k - 1) / k) - k * torch.log(k) + 1
             )
 
         return self._bce_maxima_outlier_weights[nppc_str]
