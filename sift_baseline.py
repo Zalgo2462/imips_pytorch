@@ -93,7 +93,7 @@ if params.n_eval_samples < 1:
 else:
     n_eval_samples_str = str(params.n_eval_samples)
 
-output_subdir = os.path.join(params.output_dir, test_set, n_eval_samples_str)
+output_subdir = os.path.join(params.output_dir, params.test_set, n_eval_samples_str)
 os.makedirs(output_subdir, exist_ok=True)
 
 torch.save(result_dict, os.path.join(output_subdir, "sift-baseline" + ".pt"))
