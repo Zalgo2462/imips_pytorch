@@ -71,10 +71,10 @@ train_dataset_registry = {
     "blender-livingroom-color": lambda data_root: BlenderStereoPairs(data_root, "livingroom_1", True, True),
     "blender-livingroom-gray": lambda data_root: BlenderStereoPairs(data_root, "livingroom_1", True, False),
 }
-train_dataset_registry["tum-megadepth-blender-gray"] = torch.utils.data.ConcatDataset([
-    train_dataset_registry["tum-mono"],
-    train_dataset_registry["megadepth-gray"],
-    train_dataset_registry["blender-livingroom-gray"]
+train_dataset_registry["tum-megadepth-blender-gray"] = lambda data_root: torch.utils.data.ConcatDataset([
+    train_dataset_registry["tum-mono"](data_root),
+    train_dataset_registry["megadepth-gray"](data_root),
+    train_dataset_registry["blender-livingroom-gray"](data_root)
 ])
 
 test_dataset_registry = {
@@ -91,10 +91,10 @@ test_dataset_registry = {
     "blender-livingroom-color": lambda data_root: BlenderStereoPairs(data_root, "livingroom_3", True, True),
     "blender-livingroom-gray": lambda data_root: BlenderStereoPairs(data_root, "livingroom_3", True, False),
 }
-test_dataset_registry["tum-megadepth-blender-gray"] = torch.utils.data.ConcatDataset([
-    test_dataset_registry["tum-mono"],
-    test_dataset_registry["megadepth-gray"],
-    test_dataset_registry["blender-livingroom-gray"]
+test_dataset_registry["tum-megadepth-blender-gray"] = lambda data_root: torch.utils.data.ConcatDataset([
+    test_dataset_registry["tum-mono"](data_root),
+    test_dataset_registry["megadepth-gray"](data_root),
+    test_dataset_registry["blender-livingroom-gray"](data_root)
 ])
 
 validation_dataset_registry = {
@@ -111,10 +111,10 @@ validation_dataset_registry = {
     "blender-livingroom-color": lambda data_root: BlenderStereoPairs(data_root, "livingroom_2", True, True),
     "blender-livingroom-gray": lambda data_root: BlenderStereoPairs(data_root, "livingroom_2", True, False),
 }
-validation_dataset_registry["tum-megadepth-blender-gray"] = torch.utils.data.ConcatDataset([
-    validation_dataset_registry["tum-mono"],
-    validation_dataset_registry["megadepth-gray"],
-    validation_dataset_registry["blender-livingroom-gray"]
+validation_dataset_registry["tum-megadepth-blender-gray"] = lambda data_root: torch.utils.data.ConcatDataset([
+    validation_dataset_registry["tum-mono"](data_root),
+    validation_dataset_registry["megadepth-gray"](data_root),
+    validation_dataset_registry["blender-livingroom-gray"](data_root)
 ])
 
 
