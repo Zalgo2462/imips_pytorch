@@ -66,6 +66,43 @@ class ImipNet(torch.nn.Module, metaclass=abc.ABCMeta):
         return keypoints_xy, output
 
     @torch.no_grad()
+    def extract_keypoints_batched(self, image_batch: torch.Tensor, exclude_border_px: Optional[int] = None) -> (
+            torch.Tensor, torch.Tensor):
+        defer_set_train = False
+        if self.training:
+            self.train(False)
+            defer_set_train = True
+
+        # Only return keypoints for which there is valid responses
+        if exclude_border_px is None or exclude_border_px < (self.receptive_field_diameter() - 1) // 2:
+            exclude_border_px = (self.receptive_field_diameter() - 1) // 2
+
+        # assume image is BxCxHxW
+        assert len(image_batch.shape) == 4 and image_batch.shape[1] == self._input_channels
+
+        # output: BxCxHxW -> BxCxHxW
+        output: torch.Tensor = self.__call__(image_batch, keepDim=True)
+
+        # BxCxHxW -> BxCxI where I = H*W
+        output_shape = output.shape
+        output_linear = output.reshape((output_shape[0], output_shape[1], -1))
+
+        # BxC
+        linear_arg_maxes = output_linear.argmax(dim=2)
+
+        # 2xBxC, x_pos = linear mod width, y_pos = linear / width
+        keypoints_xy = torch.zeros((2, output_shape[0], output_shape[1]), device=output.device)
+        keypoints_xy[0, :, :] = linear_arg_maxes % output_shape[3]
+        keypoints_xy[1, :, :] = linear_arg_maxes // output_shape[3]
+
+        # transpose 2xBxC to Bx2xC to match extract_keypoints
+        keypoints_xy = keypoints_xy.transpose(0, 1)
+
+        if defer_set_train:
+            self.train(True)
+        return keypoints_xy, output
+
+    @torch.no_grad()
     def extract_top_k_keypoints(self, img: torch.Tensor, k: int):
         # assume image is CxHxW
         assert len(img.shape) == 3 and img.shape[0] == self.input_channels()

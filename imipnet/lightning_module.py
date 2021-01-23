@@ -71,6 +71,11 @@ train_dataset_registry = {
     "blender-livingroom-color": lambda data_root: BlenderStereoPairs(data_root, "livingroom_1", True, True),
     "blender-livingroom-gray": lambda data_root: BlenderStereoPairs(data_root, "livingroom_1", True, False),
 }
+train_dataset_registry["tum-megadepth-blender-gray"] = torch.utils.data.ConcatDataset([
+    train_dataset_registry["tum-mono"],
+    train_dataset_registry["megadepth-gray"],
+    train_dataset_registry["blender-livingroom-gray"]
+])
 
 test_dataset_registry = {
     "tum-mono": lambda data_root: TUMMonocularStereoPairs(data_root, "test", True, 0.3),
@@ -86,6 +91,11 @@ test_dataset_registry = {
     "blender-livingroom-color": lambda data_root: BlenderStereoPairs(data_root, "livingroom_3", True, True),
     "blender-livingroom-gray": lambda data_root: BlenderStereoPairs(data_root, "livingroom_3", True, False),
 }
+test_dataset_registry["tum-megadepth-blender-gray"] = torch.utils.data.ConcatDataset([
+    test_dataset_registry["tum-mono"],
+    test_dataset_registry["megadepth-gray"],
+    test_dataset_registry["blender-livingroom-gray"]
+])
 
 validation_dataset_registry = {
     "tum-mono": lambda data_root: TUMMonocularStereoPairs(data_root, "validation", True, 0.3),
@@ -101,6 +111,11 @@ validation_dataset_registry = {
     "blender-livingroom-color": lambda data_root: BlenderStereoPairs(data_root, "livingroom_2", True, True),
     "blender-livingroom-gray": lambda data_root: BlenderStereoPairs(data_root, "livingroom_2", True, False),
 }
+validation_dataset_registry["tum-megadepth-blender-gray"] = torch.utils.data.ConcatDataset([
+    validation_dataset_registry["tum-mono"],
+    validation_dataset_registry["megadepth-gray"],
+    validation_dataset_registry["blender-livingroom-gray"]
+])
 
 
 class IMIPLightning(pl.LightningModule):

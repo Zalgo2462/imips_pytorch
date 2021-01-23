@@ -4,6 +4,7 @@ from argparse import ArgumentParser
 import cv2
 import numpy as np
 import torch
+import tqdm
 from pytorch_lightning import seed_everything
 
 from imipnet.data.pairs import CorrespondencePair
@@ -35,7 +36,7 @@ bf_matcher = cv2.BFMatcher_create(cv2.NORM_L2, crossCheck=True)
 apparent_matching_scores = []
 true_matching_scores = []
 
-for pair in test_set:  # type: CorrespondencePair
+for pair in tqdm.tqdm(test_set):  # type: CorrespondencePair
     img_1_keypoints, img_1_features = sift_handle.detectAndCompute(pair.image_1, None)
     img_1_resort = np.argsort(-1 * np.array([x.response for x in img_1_keypoints]))
     img_1_keypoints = [img_1_keypoints[i] for i in img_1_resort][:128]
@@ -65,9 +66,9 @@ for pair in test_set:  # type: CorrespondencePair
 
     # TODO: convert corrs idx to mask
 
-    img_1_inliers = (np.linalg.norm(img_1_match_kps - img_2_corrs_unpacked, ord=2,
+    img_1_inliers = (np.linalg.norm(img_1_match_kps - img_1_corrs_unpacked, ord=2,
                                     axis=0) < inlier_radius) & img_2_corrs_mask
-    img_2_inliers = (np.linalg.norm(img_2_match_kps - img_1_corrs_unpacked, ord=2,
+    img_2_inliers = (np.linalg.norm(img_2_match_kps - img_2_corrs_unpacked, ord=2,
                                     axis=0) < inlier_radius) & img_1_corrs_mask
 
     apparent_inliers = (img_1_inliers & img_2_inliers)
@@ -83,8 +84,8 @@ for pair in test_set:  # type: CorrespondencePair
 
 result_dict = {
     "matching_scores": {
-        "apparent": torch.tensor(apparent_matching_scores),
-        "true": torch.tensor(true_matching_scores),
+        "apparent": torch.sort(torch.tensor(apparent_matching_scores)).values,
+        "true": torch.sort(torch.tensor(true_matching_scores)).values,
     }
 }
 
