@@ -19,6 +19,7 @@ import imipnet.models.preprocess.harris
 import imipnet.models.preprocess.hessian
 import imipnet.models.preprocess.normalize
 import imipnet.models.preprocess.preprocess
+import imipnet.models.resnet
 import imipnet.models.strided_conv
 from imipnet.data.pairs import CorrespondencePair
 from imipnet.datasets.blender import BlenderStereoPairs
@@ -40,6 +41,8 @@ preprocess_registry = {
 model_registry = {
     "simple-conv": imipnet.models.convnet.SimpleConv,
     "strided-simple-conv": imipnet.models.strided_conv.StridedConv,
+    "resnet": imipnet.models.resnet.ResNet,
+    "invariantnet": imipnet.models.invariantnet.InvariantConv,
 }
 
 loss_registry = {
@@ -76,6 +79,11 @@ train_dataset_registry["tum-megadepth-blender-gray"] = lambda data_root: torch.u
     train_dataset_registry["megadepth-gray"](data_root),
     train_dataset_registry["blender-livingroom-gray"](data_root)
 ])
+train_dataset_registry["tum-megadepth-blender-gray-balanced"] = lambda data_root: torch.utils.data.ConcatDataset([
+    ShuffledDataset(train_dataset_registry["tum-mono"](data_root), 5000),
+    ShuffledDataset(train_dataset_registry["megadepth-gray"](data_root), 5000),
+    ShuffledDataset(train_dataset_registry["blender-livingroom-gray"](data_root), 5000)
+])
 
 test_dataset_registry = {
     "tum-mono": lambda data_root: TUMMonocularStereoPairs(data_root, "test", True, 0.3),
@@ -96,6 +104,11 @@ test_dataset_registry["tum-megadepth-blender-gray"] = lambda data_root: torch.ut
     test_dataset_registry["megadepth-gray"](data_root),
     test_dataset_registry["blender-livingroom-gray"](data_root)
 ])
+test_dataset_registry["tum-megadepth-blender-gray-balanced"] = lambda data_root: torch.utils.data.ConcatDataset([
+    ShuffledDataset(test_dataset_registry["tum-mono"](data_root), 750),
+    ShuffledDataset(test_dataset_registry["megadepth-gray"](data_root), 750),
+    ShuffledDataset(test_dataset_registry["blender-livingroom-gray"](data_root), 750)
+])
 
 validation_dataset_registry = {
     "tum-mono": lambda data_root: TUMMonocularStereoPairs(data_root, "validation", True, 0.3),
@@ -115,6 +128,11 @@ validation_dataset_registry["tum-megadepth-blender-gray"] = lambda data_root: to
     validation_dataset_registry["tum-mono"](data_root),
     validation_dataset_registry["megadepth-gray"](data_root),
     validation_dataset_registry["blender-livingroom-gray"](data_root)
+])
+validation_dataset_registry["tum-megadepth-blender-gray-balanced"] = lambda data_root: torch.utils.data.ConcatDataset([
+    ShuffledDataset(validation_dataset_registry["tum-mono"](data_root), 2500),
+    ShuffledDataset(validation_dataset_registry["megadepth-gray"](data_root), 2500),
+    ShuffledDataset(validation_dataset_registry["blender-livingroom-gray"](data_root), 2500)
 ])
 
 
