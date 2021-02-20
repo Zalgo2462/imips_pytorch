@@ -14,13 +14,14 @@ import imipnet.losses.ohnm_1_classic
 import imipnet.losses.ohnm_outlier_balanced_bce
 import imipnet.losses.ohnm_outlier_balanced_classic
 import imipnet.models.convnet
+import imipnet.models.pool_conv
 import imipnet.models.preprocess.center
 import imipnet.models.preprocess.harris
 import imipnet.models.preprocess.hessian
 import imipnet.models.preprocess.normalize
 import imipnet.models.preprocess.preprocess
-import imipnet.models.resnet
 import imipnet.models.strided_conv
+import imipnet.models.sws_conv
 from imipnet.data.pairs import CorrespondencePair
 from imipnet.datasets.blender import BlenderStereoPairs
 from imipnet.datasets.colmap import COLMAPStereoPairs
@@ -41,8 +42,8 @@ preprocess_registry = {
 model_registry = {
     "simple-conv": imipnet.models.convnet.SimpleConv,
     "strided-simple-conv": imipnet.models.strided_conv.StridedConv,
-    "resnet": imipnet.models.resnet.ResNet,
-    "invariantnet": imipnet.models.invariantnet.InvariantConv,
+    "sws-conv": imipnet.models.sws_conv.SWSConv,
+    "pool-conv": imipnet.models.pool_conv.PoolConv,
 }
 
 loss_registry = {

@@ -94,6 +94,7 @@ class CalibratedDepthPair(AbsoluteFlowPair):
         :return: forward absolute flow from image 1 to image 2
         """
         # create inverse projection ala
+        # https://github.com/colmap/colmap/blob/ff9a463067a2656d1f59d12109fe2931e29e3ca0/src/mvs/image.cc#L115
         # https://github.com/colmap/colmap/blob/d3a29e203ab69e91eda938d6e56e1c7339d62a99/src/mvs/fusion.cc#L373
         image_1_camera_matrix_inv = np.linalg.inv(np.block([[image_1_camera_matrix], [np.array([0, 0, 0, 1])]]))
 
