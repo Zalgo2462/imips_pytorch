@@ -1,3 +1,4 @@
+import os
 import timeit
 from argparse import ArgumentParser
 from typing import List, Tuple
@@ -5,6 +6,7 @@ from typing import List, Tuple
 import cv2
 import numpy as np
 import torch
+import tqdm
 
 from imipnet.data.image import load_image_for_torch
 from imipnet.lightning_module import test_dataset_registry, IMIPLightning
@@ -48,18 +50,30 @@ class IMIPNet:
 
         checkpoint_net = IMIPLightning.load_from_checkpoint(checkpoint_path, strict=False)  # calls seed everything
         checkpoint_net.freeze()
-        self.network = checkpoint_net.network.to(device=self.device)
+        self.network = checkpoint_net.to(device=self.device)
 
-    # kitti-gray-0.5[0] 304s / 1000
     def correspondences_np(self, images: List[np.ndarray]) -> List[Tuple[np.ndarray, np.ndarray]]:
-        image_batch = torch.stack([load_image_for_torch(img, device=self.device) for img in images], dim=0)
+        image_batch = [load_image_for_torch(img, device=self.device) for img in images]
         return self.correspondences_torch(image_batch)
 
-    # kitti-gray-0.5[0] 304s / 1000
-    def correspondences_torch(self, image_batch: torch.tensor) -> List[Tuple[np.ndarray, np.ndarray]]:
-        batched_corrs = self.network.extract_keypoints_batched(image_batch)[0].cpu()
+    def correspondences_torch(self, images: List[torch.tensor]) -> List[Tuple[np.ndarray, np.ndarray]]:
+        images = [self.network.preprocess(img) for img in images]
+        same_size = True
+        shape1 = images[0].shape
+        for image in images[1:]:
+            if image.shape != shape1:
+                same_size = False
+                break
+        if same_size:
+            image_batch = torch.stack(images, dim=0)
+            batched_corrs = self.network.network.extract_keypoints_batched(image_batch)[0].cpu()
+        else:
+            batched_corrs = torch.stack(
+                [self.network.network.extract_keypoints(image)[0].cpu() for image in images],
+                dim=0
+            )
         matched_kps = []
-        for i in range(image_batch.shape[0] - 1):
+        for i in range(len(images) // 2):
             matched_kps.append((
                 batched_corrs[0].numpy(),
                 batched_corrs[i + 1].numpy()
@@ -69,30 +83,48 @@ class IMIPNet:
 
 def main():
     parser = ArgumentParser()
-    parser.add_argument("checkpoint", type=str)
-    parser.add_argument('test_set', choices=test_dataset_registry.keys())
+    parser.add_argument('--test_set', choices=test_dataset_registry.keys(), default="kitti-gray-0.5")
     parser.add_argument('--data_root', default="./data")
     parser.add_argument("--output_dir", type=str, default="./test_results")
     params = parser.parse_args()
 
+    output_subdir = os.path.join(params.output_dir, params.test_set, "all")
+    os.makedirs(output_subdir, exist_ok=True)
+
     test_set = test_dataset_registry[params.test_set](params.data_root)
+    print("Loaded test dataset")
 
-    pair = test_set[0]
-    # images = [pair.image_1, pair.image_2]
-    images = [pair.image_1] * 16
+    flow_checkpoints_dir = "./experiments/Lightning -- TUM 2 KITTI OL=0.5/checkpoints/simple-conv"
+    center_ohnm16_chkpt_path = os.path.join(
+        flow_checkpoints_dir,
+        "center-sc-14_ohnm-16_simple-conv-model_outlier-balanced-bce-bce-uml-loss_train-tum-mono_eval-kitti-gray-0.5_Jan08_20-57-46_daedalus/epoch=1.ckpt"
+    )
+    harris_ohnm16_chkpt_path = os.path.join(
+        flow_checkpoints_dir,
+        "harris-sc-14_ohnm-16_simple-conv-model_outlier-balanced-bce-bce-uml-loss_train-tum-mono_eval-kitti-gray-0.5_Nov14_22-40-40_daedalus/epoch=2_v0.ckpt"
+    )
 
-    sift_corr_engine = SIFT()
-    imip_corr_engine = IMIPNet(checkpoint_path=params.checkpoint)
+    center_imipnet = IMIPNet(checkpoint_path=center_ohnm16_chkpt_path, device="cuda:0")
+    harris_imipnet = IMIPNet(checkpoint_path=harris_ohnm16_chkpt_path, device="cuda:1")
+    sift_corr = SIFT()
+    print("Loaded correspondence engines")
 
-    print("Loaded")
+    center_imipnet_timings = []
+    harris_imipnet_timings = []
+    sift_timings = []
 
-    sift_seconds = timeit.timeit(lambda: sift_corr_engine.correspondences_np(images), number=1)
+    for pair in tqdm.tqdm(test_set, desc="Test Stereo Pairs"):
+        images = [pair.image_1, pair.image_2]
+        center_imipnet_seconds = timeit.timeit(lambda: center_imipnet.correspondences_np(images), number=1)
+        harris_imipnet_seconds = timeit.timeit(lambda: harris_imipnet.correspondences_np(images), number=1)
+        sift_seconds = timeit.timeit(lambda: sift_corr.correspondences_np(images), number=1)
+        center_imipnet_timings.append(center_imipnet_seconds)
+        harris_imipnet_timings.append(harris_imipnet_seconds)
+        sift_timings.append(sift_seconds)
 
-    image_batch = torch.stack([load_image_for_torch(img, device=imip_corr_engine.device) for img in images], dim=0)
-    imip_seconds = timeit.timeit(lambda: imip_corr_engine.correspondences_torch(image_batch), number=1)
-
-    print("SIFT: %f" % sift_seconds)
-    print("IMIP: %f" % imip_seconds)
+    torch.save(torch.tensor(center_imipnet_timings), os.path.join(output_subdir, "center_imipnet_timings.pt"))
+    torch.save(torch.tensor(harris_imipnet_timings), os.path.join(output_subdir, "harris_imipnet_timings.pt"))
+    torch.save(torch.tensor(sift_timings), os.path.join(output_subdir, "sift_timings.pt"))
     return
 
 

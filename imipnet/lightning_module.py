@@ -173,7 +173,11 @@ class IMIPLightning(pl.LightningModule):
         self.preprocess = preprocess_registry[hparams.preprocess]()
         channels_in = self.preprocess.output_channels(hparams.channels_in)
 
-        self.network = model_registry[hparams.model](hparams.n_convolutions, channels_in, hparams.channels_out)
+        self.network = model_registry[hparams.model](
+            num_convolutions=hparams.n_convolutions,
+            input_channels=channels_in,
+            output_channels=hparams.channels_out
+        )
         self._loss = loss_registry[hparams.loss]()
         self._lr = hparams.learning_rate
 

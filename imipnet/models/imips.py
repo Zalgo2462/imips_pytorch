@@ -66,16 +66,12 @@ class ImipNet(torch.nn.Module, metaclass=abc.ABCMeta):
         return keypoints_xy, output
 
     @torch.no_grad()
-    def extract_keypoints_batched(self, image_batch: torch.Tensor, exclude_border_px: Optional[int] = None) -> (
+    def extract_keypoints_batched(self, image_batch: torch.Tensor) -> (
             torch.Tensor, torch.Tensor):
         defer_set_train = False
         if self.training:
             self.train(False)
             defer_set_train = True
-
-        # Only return keypoints for which there is valid responses
-        if exclude_border_px is None or exclude_border_px < (self.receptive_field_diameter() - 1) // 2:
-            exclude_border_px = (self.receptive_field_diameter() - 1) // 2
 
         # assume image is BxCxHxW
         assert len(image_batch.shape) == 4 and image_batch.shape[1] == self._input_channels
